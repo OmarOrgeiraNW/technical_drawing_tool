@@ -1,0 +1,19 @@
+[project]
+name = "drawtool"
+version = "0.1.0"
+description = "Turn a STEP part into an ISO 2D manufacturing drawing (PDF + DXF)"
+requires-python = ">=3.10"
+dependencies = ["build123d>=0.13", "ezdxf>=1.4", "pymupdf>=1.24", "pyyaml>=6"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+drawtool = "drawtool.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["drawtool"]
