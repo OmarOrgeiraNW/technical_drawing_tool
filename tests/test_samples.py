@@ -25,15 +25,26 @@ EXPECTED = {
         "dims": ["(58.6)", "(110.33)", "(34.407)"],
         # all flange holes are seen from below; from above the horn hides some of them
         "extra_views": {"Z from below"},
-        "hole_sizes": {"4× Ø1.56 THRU", "4× Ø1.7 THRU", "8× Ø2.2 THRU"},
+        "hole_sizes": {"4× Ø1.56 THRU", "4× Ø1.7 THRU", "8× Ø2.2 THRU", "2× WR-19,", "2.388 (X) × 4.775 (Y),"},
+        "section": "W–W",
+        # the flange face carries every opening; the two WR-19 ports form datum B
+        "datum_a": (0, 0, -1), "datum_b": ["D1", "D2"],
+        # checked against the STEP vertices: x = ±16.1938 / ±13.8062, y = ±2.3876 (0.094 x 0.188 in)
+        "ports": [("D1", "view Z", (-15.0, 0.0, -48.083)), ("D2", "view Z", (15.0, 0.0, -48.083))],
     },
     "2026_03_26-Design-NW-Cassegrain-v03-REFERENCE.STEP": {
         "size": (291.06, 291.06, 148.9775), "front": "-Y", "up": "+Z", "volume": 103422.1,
-        "sheet": "A3", "scale": 0.5, "views": ["front", "top"],  # side view repeats the front
+        # the section only fits at the drawing scale on A2
+        "sheet": "A2", "scale": 0.5, "views": ["front", "top"],  # side view repeats the front
         "dims": ["(148.9775)", "(Ø291.06)"],
         # M5 holes under the dish seen from below; the feed block's back face from behind
         "extra_views": {"Z from below", "W from behind"},
-        "hole_sizes": {"4× Ø1.25 depth 6.5", "Ø2 THRU", "8× Ø4.2 depth 8.68"},
+        # the 8 M5 holes are one pitch-circle row instead of 8 X/Y rows
+        "hole_sizes": {"4× Ø1.25 depth 6.5", "Ø2 THRU, datum B", "8× Ø4.2 depth 8.68,", "PCD Ø145.39 EQS,"},
+        "section": "V–V",
+        # the feed flange face (5 openings) with the Ø2 circular waveguide as datum B
+        "datum_a": (0, -1, 0), "datum_b": ["B1"],
+        "ports": [],
     },
 }
 
@@ -62,6 +73,11 @@ def test_drawing(sample, tmp_path):
     assert set(info["extra_views"]) == exp["extra_views"]
     texts = {e.dxf.text for e in doc.modelspace() if e.dxftype() == "TEXT"}
     assert exp["hole_sizes"] <= texts  # equal holes grouped under one size with their count
+    assert info["section"] == exp["section"]
+    assert any(e.dxftype() == "HATCH" for e in doc.modelspace().query("*[layer=='HATCH']"))
+    assert info["datums"]["A"]["normal"] == pytest.approx(exp["datum_a"])
+    assert info["datums"]["B"]["tags"] == exp["datum_b"]
+    assert {"Ø0.1", "A", "B"} <= texts  # position tolerance frames refer to the datums
     assert info["problems"] == []
     doc.saveas(tmp_path / "part.dxf")
     assert sheet.render(doc, info["sheet"], "pdf")[:4] == b"%PDF"
@@ -106,9 +122,15 @@ def test_holes_match_features_json(sample, tmp_path):
         assert got["through"] == want["through"]
         assert got["point"] == pytest.approx(want["point"], abs=0.01)
         assert got["axis"] == pytest.approx(want["axis"], abs=1e-3)
-    # the YAML template lists every hole type, with guesses waiting for confirmation
+    ports = json.loads((tmp_path / f"{path.stem}.features.json").read_text(encoding="utf-8"))["ports"]
+    want_ports = EXPECTED[path.name]["ports"]
+    assert [(p["tag"], p["view"]) for p in ports] == [(t, v) for t, v, _ in want_ports]
+    for p, (_, _, point) in zip(ports, want_ports):
+        assert p["point"] == pytest.approx(point, abs=0.01)
+        assert (p["waveguide"], p["size"]) == ("WR-19", [4.775, 2.388])
+    # the YAML template lists every hole and port type, with guesses waiting for confirmation
     cfg = yaml.safe_load((tmp_path / f"{path.stem}.yaml").read_text(encoding="utf-8"))
-    assert set(cfg["holes"]) == {h["type"] for h in expected}
+    assert set(cfg["holes"]) == {h["type"] for h in expected} | {p["type"] for p in ports}
 
 
 def _coloured_plate(path):
@@ -162,6 +184,48 @@ def test_coloured_plate(tmp_path):
     assert {h["type"]: h["colours"] for h in info["holes"]}["Ø3.30 depth 6.00"] == ["red"]
     assert all(h["view"] == "top" for h in info["holes"])
     assert info["extra_views"] == []
+    assert info["problems"] == []
+
+
+def test_waveguide_sizes():
+    assert geometry.waveguide(4.775, 2.388) == "WR-19"
+    assert geometry.waveguide(1.88, 3.759) == "WR-15"  # either order
+    assert geometry.waveguide(22.86, 10.16) == "WR-90"
+    assert geometry.waveguide(2.293, 0.947) is None  # a lattice pocket, not a waveguide
+
+
+def test_bolt_circle():
+    def rows(points):
+        return [{"xy": np.array(p, float), "hole": {}, "tag": f"C{i}"} for i, p in enumerate(points, 1)]
+
+    ring = [(10 + 50 * np.cos(a), 5 + 50 * np.sin(a)) for a in np.radians(np.arange(90, 450, 45))]
+    centre, radius, first = sheet.bolt_circle(rows(ring))
+    assert centre == pytest.approx((10, 5)) and radius == pytest.approx(50) and first == pytest.approx(90)
+    assert sheet.bolt_circle(rows(ring[:7])) is None  # one missing: not equally spaced
+    assert sheet.bolt_circle(rows([(-5, -5), (5, -5), (-5, 5), (5, 5)])) is None  # a square stays X/Y
+
+
+def test_surface_marks_and_datum_pick(tmp_path):
+    """A face picked edge-on in the front view gets a machined mark; the port D2 picked as datum B."""
+    path = SAMPLES / "2026_09_16-Design-NW-HornQV-v01-REFERENCE.STEP"
+    shape = geometry.load_step(path)
+    cfg = partfile.load(None, path)
+    _, info = sheet.build(shape, cfg)
+    front = info["places"]["front"]
+    x0, y0 = front["rect"][0] + 10, front["rect"][1]  # on the flange's underside line
+    xy = ((x0 - front["origin"][0]) / front["scale"], (y0 - front["origin"][1]) / front["scale"])
+    point, edge_on = geometry.pick(shape, front["frame"], xy, 0.8 / front["scale"])
+    assert edge_on and point[2] == pytest.approx(-48.083, abs=1e-3)
+    cfg["surfaces"] = {"default": "as built", "marks": [
+        {"finish": "machined", "ra": "Ra 1.6", "view": "front", "point": point.tolist(), "edge": True,
+         "at": [-15, -10]}]}
+    cfg["datum"]["B"] = [15, 0, -48.083]
+    doc, info = sheet.build(shape, cfg)
+    marks = {e.dxf.text for e in doc.modelspace().query("TEXT[layer=='SURFACES']")}
+    assert marks == {"machined", "Ra 1.6"}
+    assert info["datums"]["B"]["tags"] == ["D2"] and info["datums"]["origin"] == pytest.approx([15, 0, -48.083])
+    notes = " ".join(e.dxf.text for e in doc.modelspace().query("TEXT[layer=='TEXT']"))
+    assert "Surfaces not marked otherwise: as built, Ra 3.2." in notes
     assert info["problems"] == []
 
 

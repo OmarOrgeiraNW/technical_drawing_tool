@@ -21,7 +21,10 @@ def analyze(step, out):
         "volume_mm3": round(geometry.volume(shape), 1),
         "planar_faces": geometry.planar_faces(shape),
         "views": {"front": info["front"], "up": info["up"]},
+        "section": info["section"],
+        "datums": info["datums"],
         "holes": info["holes"],
+        "ports": info["ports"],
     }
     (out / f"{stem}.features.json").write_text(json.dumps(features, indent=2, ensure_ascii=False),
                                                encoding="utf-8")
@@ -31,7 +34,7 @@ def analyze(step, out):
         partfile.write_template(yaml_path, step, features, info["hole_types"])
     (out / f"{stem}.preview.png").write_bytes(sheet.render(doc, info["sheet"], "png", dpi=100))
     print(f"wrote {stem}.features.json, {yaml_path.name}, {stem}.preview.png to {out} "
-          f"({len(info['holes'])} holes)")
+          f"({len(info['holes'])} holes, {len(info['ports'])} waveguide ports)")
     for w in info["warnings"]:
         print(f"to check: {w}", file=sys.stderr)
 
@@ -46,7 +49,14 @@ def draw(step, yaml_path, out):
     (out / f"{stem}.pdf").write_bytes(sheet.render(doc, info["sheet"], "pdf"))
     (out / f"{stem}.png").write_bytes(sheet.render(doc, info["sheet"], "png"))
     print(f"wrote {stem}.dxf/.pdf/.png to {out}  ({info['sheet']}, scale {sheet.fmt_scale(info['scale'])}, "
-          f"front {info['front']}, up {info['up']}, {len(info['holes'])} holes)")
+          f"front {info['front']}, up {info['up']}, {len(info['holes'])} holes, "
+          f"{len(info['ports'])} waveguide ports)")
+    if info["section"]:
+        print(f"section {info['section']}")
+    if info["datums"]:
+        d = info["datums"]
+        print("datums: A = face " + str(d["A"]["centre"]) +
+              "".join(f", {k} = {', '.join(d[k]['tags'])}" for k in ("B", "C") if k in d))
     if info["extra_views"]:
         print("extra views for holes: " + ", ".join(info["extra_views"]))
     for w in info["warnings"]:

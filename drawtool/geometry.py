@@ -8,11 +8,14 @@ import numpy as np
 from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.BRepTools import BRepTools
-from OCP.GeomAbs import GeomAbs_Circle, GeomAbs_Cone, GeomAbs_Cylinder, GeomAbs_Plane
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+from OCP.BRepTools import BRepTools, BRepTools_WireExplorer
+from OCP.GCPnts import GCPnts_TangentialDeflection
+from OCP.GeomAbs import GeomAbs_Circle, GeomAbs_Cone, GeomAbs_Cylinder, GeomAbs_Line, GeomAbs_Plane
 from OCP.gp import gp_Ax2, gp_Dir, gp_Lin, gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.HLRAlgo import HLRAlgo_Projector
@@ -25,7 +28,7 @@ from OCP.STEPControl import STEPControl_Reader
 from OCP.TCollection import TCollection_ExtendedString
 from OCP.TDocStd import TDocStd_Document
 from OCP.XCAFDoc import XCAFDoc_ColorGen, XCAFDoc_ColorSurf, XCAFDoc_DocumentTool
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_WIRE
 from OCP.TopExp import TopExp, TopExp_Explorer
 from OCP.TopoDS import TopoDS
 from OCP.collections import IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher as ShapeMap
@@ -122,6 +125,103 @@ def planar_faces(shape, count=5):
         faces.append({"area": round(props.Mass(), 2), "normal": np.round(normal, 4).tolist(),
                       "center": np.round(props.CentreOfMass().Coord(), 3).tolist()})
     return sorted(faces, key=lambda f: -f["area"])[:count]
+
+
+_faces = {"shape": None, "list": None}
+
+
+def flat_faces(shape):
+    """Every planar face: the face, outward normal, centre, area and outline points (cached)."""
+    if _faces["shape"] is not shape:
+        _faces.update(shape=shape, list=_flat_faces(shape))
+    return _faces["list"]
+
+
+def pick(shape, frame, xy, tol, cut=None):
+    """The model point on the surface under point `xy` of a view: (point, edge_on) or None.
+
+    A flat face seen edge-on whose line passes within `tol` of the point wins (the
+    nearest such face that nothing hides); otherwise the first surface a ray from
+    the viewer meets. `cut` = (normal, offset) of a section's cutting plane:
+    material in front of it does not count.
+    """
+    d, y = np.asarray(frame[0], float), np.asarray(frame[1], float)
+    x = np.cross(y, d)
+    q = np.asarray(xy, float)
+    found = []
+    for f in flat_faces(shape):
+        n = f["normal"]
+        if abs(n @ d) > 1e-6:
+            continue
+        pts = f["pts"] if cut is None else f["pts"][f["pts"] @ cut[0] >= cut[1] - 1e-6]
+        if len(pts) < 2:
+            continue
+        n2 = np.array([n @ x, n @ y])
+        t2 = np.array([-n2[1], n2[0]])
+        c, along = float(np.mean(pts @ n)), pts @ np.c_[x, y] @ t2
+        if abs(q @ n2 - c) <= tol and along.min() - tol <= q @ t2 <= along.max() + tol:
+            found.append(((pts @ d).max(), f, c))
+    for depth, f, c in sorted(found, key=lambda t: -t[0]):
+        p = q[0] * x + q[1] * y + (depth - 1e-3) * d
+        p += f["normal"] * (c - p @ f["normal"])
+        stop = 1e5 if cut is None else max(p @ cut[0] - cut[1], 0.0)
+        if stop <= 0.02 or clear_ray(shape, p + 0.01 * f["normal"], d, stop=stop):
+            return p, True
+    clear_ray(shape, q[0] * x + q[1] * y, d)  # loads the probe for this shape
+    probe = _probe["probe"]
+    start = q[0] * x + q[1] * y + 1e4 * d
+    probe.Perform(gp_Lin(gp_Pnt(*start), gp_Dir(*-d)), 0, 2e4)
+    hits = [(probe.WParameter(i), np.array(probe.Pnt(i).Coord())) for i in range(1, probe.NbPnt() + 1)]
+    hits = [(t, p) for t, p in hits if cut is None or p @ cut[0] >= cut[1] - 1e-6]
+    return (min(hits, key=lambda h: h[0])[1], False) if hits else None
+
+
+def _flat_faces(shape):
+    out = []
+    for face in _explore(shape, TopAbs_FACE, TopoDS.Face):
+        surface = BRepAdaptor_Surface(face)
+        if surface.GetType() != GeomAbs_Plane:
+            continue
+        normal = np.array(surface.Plane().Axis().Direction().Coord())
+        if face.Orientation() == TopAbs_REVERSED:
+            normal = -normal
+        props = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(face, props)
+        pts = []
+        for edge in _explore(BRepTools.OuterWire_s(face), TopAbs_EDGE, TopoDS.Edge):
+            curve = BRepAdaptor_Curve(edge)
+            pts += [curve.Value(t).Coord() for t in np.linspace(curve.FirstParameter(), curve.LastParameter(), 5)]
+        out.append({"face": face, "normal": normal, "centre": np.array(props.CentreOfMass().Coord()),
+                    "area": props.Mass(), "pts": np.array(pts)})
+    return out
+
+
+def on_face(face, point, normal=None, tol=1e-3):
+    """True when `point` lies in the face's plane, within its outline's bounding box
+    (and, if given, `normal` points the face's way)."""
+    n = face["normal"]
+    if normal is not None and np.dot(normal, n) < 0.999:
+        return False
+    if abs(np.dot(np.asarray(point) - face["centre"], n)) > tol:
+        return False
+    k = int(np.argmax(np.abs(n)))
+    rest = [i for i in range(3) if i != k]
+    lo, hi = face["pts"][:, rest].min(axis=0) - tol, face["pts"][:, rest].max(axis=0) + tol
+    return bool(np.all(np.asarray(point)[rest] >= lo) and np.all(np.asarray(point)[rest] <= hi))
+
+
+_probe = {"shape": None, "probe": None}
+
+
+def clear_ray(shape, point, direction, start=0.02, stop=1e5):
+    """True when the ray from `point` along `direction` meets no material between `start` and `stop` mm."""
+    if _probe["shape"] is not shape:
+        probe = IntCurvesFace_ShapeIntersector()
+        probe.Load(shape, 1e-6)
+        _probe.update(shape=shape, probe=probe)
+    _probe["probe"].Perform(gp_Lin(gp_Pnt(*np.asarray(point, float)), gp_Dir(*np.asarray(direction, float))),
+                            start, stop)
+    return _probe["probe"].NbPnt() == 0
 
 
 def nearest_axis(v):
@@ -268,6 +368,77 @@ def chain(segments, tol=1e-4):
         line = extend([a, b])[::-1]
         polylines.append(np.array(extend(line)))
     return polylines
+
+
+_sections = {"shape": None, "views": {}}
+
+
+def section_view(shape, frame, normal, offset):
+    """Section of the part by the plane p . normal = offset, seen along `frame`.
+
+    The material on the viewer's side (p . normal < offset) is removed. Returns
+    the visible lines of what is left and, per cut face, its boundary loops in
+    view coordinates (to be hatched); no loops when the plane misses the part.
+    `normal` must be a coordinate axis, as all view directions are.
+    """
+    if _sections["shape"] is not shape:
+        _sections.update(shape=shape, views={})
+    key = (tuple(np.round(frame[0], 6)), tuple(np.round(frame[1], 6)), tuple(np.round(normal, 6)),
+           round(offset, 6))
+    if key not in _sections["views"]:
+        _sections["views"][key] = _section_view(shape, frame, normal, offset)
+    return _sections["views"][key]
+
+
+def _section_view(shape, frame, normal, offset):
+    env = envelope(shape)
+    lo, hi = np.array(env["min"]) - 10, np.array(env["max"]) + 10
+    k = int(np.argmax(np.abs(normal)))
+    at = offset * np.sign(normal[k])  # plane position along axis k
+    if normal[k] > 0:
+        hi[k] = at
+    else:
+        lo[k] = at
+    if hi[k] <= lo[k]:
+        return [], []
+    cut = BRepAlgoAPI_Cut(shape, BRepPrimAPI_MakeBox(gp_Pnt(*lo), gp_Pnt(*hi)).Shape()).Shape()
+    loops = []
+    for face in _explore(cut, TopAbs_FACE, TopoDS.Face):
+        surf = BRepAdaptor_Surface(face)
+        if surf.GetType() != GeomAbs_Plane:
+            continue
+        plane = surf.Plane()
+        if abs(abs(plane.Axis().Direction().Coord()[k]) - 1) < 1e-6 and abs(plane.Location().Coord()[k] - at) < 1e-4:
+            loops.append(face_loops(face, frame, max(env["size"]) / 2000))
+    if not loops:
+        return [], []
+    prepare(cut)
+    return _project(cut, *frame), loops
+
+
+def face_loops(face, frame, deflection):
+    """Each wire of a face as a closed 2D polygon in the view's coordinates (outer wire first)."""
+    d, y = frame
+    x = np.cross(y, d)
+    outer = BRepTools.OuterWire_s(face)
+    wires = sorted(_explore(face, TopAbs_WIRE, TopoDS.Wire), key=lambda w: not w.IsSame(outer))
+    loops = []
+    for wire in wires:
+        pts = []
+        walk = BRepTools_WireExplorer(wire, face)
+        while walk.More():
+            edge = walk.Current()
+            if not BRep_Tool.Degenerated_s(edge):
+                curve = BRepAdaptor_Curve(edge)
+                sample = GCPnts_TangentialDeflection(curve, 0.1, deflection)
+                p = [sample.Value(i).Coord() for i in range(1, sample.NbPoints() + 1)]
+                pts += p[::-1] if walk.Orientation() == TopAbs_REVERSED else p
+            walk.Next()
+        if len(pts) > 2:
+            a = np.array(pts)
+            a = a[np.r_[True, np.linalg.norm(np.diff(a, axis=0), axis=1) > 1e-9]]  # edges share end points
+            loops.append(np.c_[a @ x, a @ y])
+    return loops
 
 
 def clip_to_circle(polylines, centre, radius):
@@ -544,6 +715,96 @@ def _hole(group, d, base, e1, e2, full, crosses):
     return {"axis": d, "diameter": 2 * r_drill, "through": through, "length": hi - lo,
             "entries": entries,
             "pitch": _pitch(drill), "colours": sorted({f["colour"] for f in group if f["colour"]})}
+
+
+WAVEGUIDES = [  # EIA rectangular waveguides: inside broad x narrow wall, inches
+    ("WR-430", 4.300, 2.150), ("WR-340", 3.400, 1.700), ("WR-284", 2.840, 1.340), ("WR-229", 2.290, 1.145),
+    ("WR-187", 1.872, 0.872), ("WR-159", 1.590, 0.795), ("WR-137", 1.372, 0.622), ("WR-112", 1.122, 0.497),
+    ("WR-90", 0.900, 0.400), ("WR-75", 0.750, 0.375), ("WR-62", 0.622, 0.311), ("WR-51", 0.510, 0.255),
+    ("WR-42", 0.420, 0.170), ("WR-34", 0.340, 0.170), ("WR-28", 0.280, 0.140), ("WR-22", 0.224, 0.112),
+    ("WR-19", 0.188, 0.094), ("WR-15", 0.148, 0.074), ("WR-12", 0.122, 0.061), ("WR-10", 0.100, 0.050),
+    ("WR-8", 0.080, 0.040), ("WR-6", 0.065, 0.0325), ("WR-5", 0.051, 0.0255), ("WR-4", 0.043, 0.0215),
+    ("WR-3", 0.034, 0.017),
+]
+
+
+def waveguide(a, b):
+    """EIA name of a rectangular opening a x b mm (either order), or None."""
+    big, small = max(a, b), min(a, b)
+    return next((name for name, wa, wb in WAVEGUIDES
+                 if abs(big - wa * 25.4) <= max(0.01, 0.005 * big) and abs(small - wb * 25.4) <= max(0.01, 0.005 * small)),
+                None)
+
+
+def ports(shape):
+    """Rectangular waveguide openings (standard EIA sizes) in flat faces.
+
+    Each is returned like a hole (axis, entries, "diameter" = diagonal) plus
+    kind "port", the WR name, its size (broad, narrow), the broad-wall direction
+    and the corner radius. Other rectangular cut-outs (lattice pockets, lettering)
+    do not match a waveguide size and are ignored.
+    """
+    probe = IntCurvesFace_ShapeIntersector()
+    probe.Load(shape, 1e-6)
+    found = []
+    for face in _explore(shape, TopAbs_FACE, TopoDS.Face):
+        surf = BRepAdaptor_Surface(face)
+        if surf.GetType() != GeomAbs_Plane:
+            continue
+        n = np.array(surf.Plane().Axis().Direction().Coord())
+        if face.Orientation() == TopAbs_REVERSED:
+            n = -n
+        outer = BRepTools.OuterWire_s(face)
+        for wire in _explore(face, TopAbs_WIRE, TopoDS.Wire):
+            if wire.IsSame(outer):
+                continue
+            port = _port(wire, n)
+            if port:
+                c = port["centre"]
+                corners = [c + s * 0.3 * port["size"][0] * port["long"] + t * 0.3 * port["size"][1] * port["short"]
+                           for s in (-1, 1) for t in (-1, 1)]
+                blocked = 0
+                for p in [c] + corners:
+                    probe.Perform(gp_Lin(gp_Pnt(*p), gp_Dir(*n)), 0.05, 1e5)
+                    blocked += probe.NbPnt() > 0
+                axis = n if n[np.argmax(np.abs(n))] > 0 else -n
+                found.append({"kind": "port", "name": port["name"], "size": port["size"], "long": port["long"],
+                              "radius": port["radius"], "axis": axis, "diameter": float(np.hypot(*port["size"])),
+                              "through": None, "length": 0.0, "pitch": None, "colours": [],
+                              "entries": [{"point": c, "out": n, "cbore": None, "csk": None,
+                                           "exposed": blocked <= 1, "depth": None}]})
+    return sorted(found, key=lambda h: tuple(np.round(h["entries"][0]["point"], 2)))
+
+
+def _port(wire, n):
+    """A waveguide-sized rectangle (sharp or equally rounded corners) or None."""
+    lines, arcs, pts = [], [], []
+    for edge in _explore(wire, TopAbs_EDGE, TopoDS.Edge):
+        curve = BRepAdaptor_Curve(edge)
+        a, b = curve.FirstParameter(), curve.LastParameter()
+        pts += [curve.Value(t).Coord() for t in np.linspace(a, b, 5)]
+        if curve.GetType() == GeomAbs_Line:
+            lines.append(np.array(curve.Line().Direction().Coord()))
+        elif curve.GetType() == GeomAbs_Circle:
+            arcs.append(curve.Circle().Radius())
+        else:
+            return None
+    if len(lines) != 4 or len(arcs) not in (0, 4) or (arcs and max(arcs) - min(arcs) > 1e-6):
+        return None
+    u = lines[0]
+    v = np.cross(n, u)
+    if not all(abs(d @ u) > 0.9999 or abs(d @ v) > 0.9999 for d in lines):
+        return None
+    pts = np.array(pts)
+    pu, pv = pts @ u, pts @ v
+    a, b = np.ptp(pu), np.ptp(pv)
+    name = waveguide(a, b)
+    if not name:
+        return None
+    centre = u * (pu.min() + pu.max()) / 2 + v * (pv.min() + pv.max()) / 2 + n * (pts[0] @ n)
+    long, short = (u, v) if a >= b else (v, u)
+    return {"name": name, "size": (max(a, b), min(a, b)), "centre": centre, "long": long, "short": short,
+            "radius": arcs[0] if arcs else 0.0}
 
 
 def _pitch(drill_faces):

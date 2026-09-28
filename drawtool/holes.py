@@ -46,8 +46,18 @@ def fmt(v):
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
+def fmt3(v):
+    return f"{v:.3f}".rstrip("0").rstrip(".")
+
+
+POSITION = {"hole": "Ø0.1", "port": "0.05"}  # default position tolerance per feature group
+
+
 def type_key(hole, entry):
     """Stable name of a hole type, used as its key in the part YAML."""
+    if hole.get("kind") == "port":
+        a, b = hole["size"]
+        return f"{hole['name']} {a:.3f} × {b:.3f}" + (f" R{hole['radius']:.2f}" if hole["radius"] else "")
     parts = [f"Ø{hole['diameter']:.2f}", "THRU" if hole["through"] else f"depth {entry['depth']:.2f}"]
     if entry["cbore"]:
         parts.append(f"cbore Ø{entry['cbore'][0]:.2f} depth {entry['cbore'][1]:.2f}")
@@ -73,6 +83,9 @@ def thread_major(callout):
 
 def guess(hole, entry):
     """Pre-filled YAML entry for a hole type. Anything guessed needs confirming."""
+    if hole.get("kind") == "port":
+        return {"thread": "", "thread_depth": None, "tolerance": "", "finish": "", "position": POSITION["port"],
+                "confirm": False, "note": f"{hole['name']} waveguide port"}
     candidates = thread_candidates(hole["diameter"], hole["pitch"])
     thread = candidates[0] if candidates else ""
     notes = []
@@ -98,14 +111,24 @@ def guess(hole, entry):
         else:  # usable thread ends ~3 pitches short of the drill depth (tap chamfer)
             pitch = next(t[2] for t in THREADS if t[0] == thread)
             depth = max(math.floor((entry["depth"] - 3 * pitch) * 2) / 2, round(1.5 * pitch, 1))
-    return {"thread": thread, "thread_depth": depth, "tolerance": "", "finish": "",
+    return {"thread": thread, "thread_depth": depth, "tolerance": "", "finish": "", "position": POSITION["hole"],
             "confirm": bool(thread or hole["colours"]), "note": "; ".join(notes)}
 
 
-def size_text(hole, entry, spec):
-    """Hole-table SIZE text. Unconfirmed guesses are left out."""
+def size_text(hole, entry, spec, x_dir=None):
+    """Hole-table SIZE text. Unconfirmed guesses are left out.
+
+    Ports give their sides along the view's X and Y (`x_dir`: the view's X axis).
+    """
     use = spec if spec and not spec.get("confirm") else {}
     thread, tol, finish = (str(use.get(k) or "").strip() for k in ("thread", "tolerance", "finish"))
+    if hole.get("kind") == "port":
+        a, b = (fmt3(v) for v in hole["size"])
+        along_x = x_dir is None or abs(hole["long"] @ x_dir) > 0.5
+        text = f"{hole['name']}, {a} (X) × {b} (Y)" if along_x else f"{hole['name']}, {b} (X) × {a} (Y)"
+        if hole["radius"]:
+            text += f", corners R{fmt(hole['radius'])}"
+        return text + (f" {tol}" if tol else "") + (f", {finish}" if finish else "")
     through, depth = hole["through"], entry["depth"]
     if thread:
         td = use.get("thread_depth")

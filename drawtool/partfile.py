@@ -33,10 +33,15 @@ def defaults(step_path):
         "edges": {"external": "-0.3", "internal": "+0.3"},
         "density": None,
         "views": {"front": "auto", "up": "auto", "iso": "auto", "confirm": False},
-        "datum": {"origin": "auto", "confirm": False},
+        "datum": {"A": "auto", "B": "auto", "C": None, "origin": "auto", "confirm": False},
+        "section": "auto",
+        "surfaces": {"default": "any", "marks": []},
         "holes": {},
         "notes": [],
     }
+
+
+FINISHES = ["any", "machined", "as built"]  # ISO 21920-1: basic symbol, material removal required / not permitted
 
 
 DENSITIES = {  # g/cm3, matched against the material text (case and spaces ignored)
@@ -89,7 +94,7 @@ title_block:
   status: "Draft"
   sheet: "1/1"
 
-sheet: auto                    # auto | A4 | A3
+sheet: auto                    # auto | A4 | A3 | A2
 scale: auto                    # auto | "1:1" | "1:2" | "2:1" ...
 general_tolerance: "ISO 2768-mK"
 default_finish: "Ra 3.2"
@@ -105,10 +110,19 @@ views:
   iso: auto                    # or a direction such as "+X-Y+Z"
   confirm: true
 
-datum:
-  origin: auto                 # hole table origin: auto (centre lines where symmetric, else the
-                               # lower/left edge) | centre | corner | [x, y, z] in model coordinates
+datum:                         # ISO 5459 datums for the hole tables and position tolerances
+  A: auto                      # auto (the flat face most holes open onto) | none | [x, y, z] on the face
+  B: auto                      # auto (the largest opening on A, a waveguide port first) | none | [x, y, z]
+  C:                           # optional: [x, y, z] at a second opening
+  origin: auto                 # hole table origin: auto (datum B, else the centre lines where symmetric,
+                               # else the lower/left edge) | centre | corner | [x, y, z] in model coordinates
   confirm: {datum_confirm}
+
+section: auto                  # auto (through the middle, seen from the left) | none
+
+surfaces:                      # ISO 21920-1 surface texture
+  default: any                 # symbol in the title block: any | machined | as built
+  marks: []                    # surfaces marked in the app: finish, ra, view, point, at
 
 {holes}
 notes: []                      # your own notes, after the standard ones, e.g.
@@ -126,11 +140,12 @@ def _holes_yaml(types):
         spec = t["spec"]
         note = f"; {spec['note']}" if spec.get("note") else ""
         depth = spec.get("thread_depth")
-        out += [f"  {json.dumps(t['key'], ensure_ascii=False)}:    # {t['letter']}: {t['count']} hole(s){note}",
-                f"    thread: {json.dumps(spec.get('thread') or '')}",
+        out += [f"  {json.dumps(t['key'], ensure_ascii=False)}:    # {t['letter']}: {t['count']} {t.get('kind', 'hole')}(s){note}",
+                f"    thread: {json.dumps(spec.get('thread') or '', ensure_ascii=False)}",
                 f"    thread_depth: {'' if depth is None else depth}",
-                f"    tolerance: {json.dumps(spec.get('tolerance') or '')}",
-                f"    finish: {json.dumps(spec.get('finish') or '')}",
+                f"    tolerance: {json.dumps(spec.get('tolerance') or '', ensure_ascii=False)}",
+                f"    finish: {json.dumps(spec.get('finish') or '', ensure_ascii=False)}",
+                f"    position: {json.dumps(spec.get('position') or '', ensure_ascii=False)}    # position tolerance; empty = none",
                 f"    confirm: {'true' if spec.get('confirm') else 'false'}"]
     return "\n".join(out) + "\n"
 

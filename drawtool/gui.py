@@ -19,7 +19,7 @@ import yaml
 from . import cli, geometry, partfile, sheet
 
 DIRECTIONS = ["auto", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
-SHEETS = ["auto", "A4", "A3"]
+SHEETS = ["auto", "A4", "A3", "A2"]
 SCALES = ["auto", "5:1", "2:1", "1:1", "1:2", "1:5", "1:10"]
 ORIGINS = ["auto", "centre", "corner"]
 TITLE_FIELDS = [("title", "Title"), ("part_number", "Part number"), ("revision", "Revision"),
@@ -35,14 +35,22 @@ class Preview(tk.Canvas):
         self.page = None
         self.zoom, self.ox, self.oy = 1.0, 0.0, 0.0
         self._image = None
-        self._last = (0, 0)
+        self._last = self._press = (0, 0)
+        self.on_click = None  # set while picking: called with the page position (0..1 from top left)
         self.bind("<Configure>", lambda e: self.fit())
         self.bind("<MouseWheel>", lambda e: self.zoom_at(e.x, e.y, 1.25 if e.delta > 0 else 0.8))
         self.bind("<Button-4>", lambda e: self.zoom_at(e.x, e.y, 1.25))  # Linux wheel
         self.bind("<Button-5>", lambda e: self.zoom_at(e.x, e.y, 0.8))
         self.bind("<ButtonPress-1>", self._grab)
         self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", self._release)
         self.bind("<Double-Button-1>", lambda e: self.fit())
+
+    def _release(self, event):
+        """A click (press and release without dragging) while picking."""
+        if self.on_click and self.page and abs(event.x - self._press[0]) + abs(event.y - self._press[1]) < 4:
+            r = self.page.rect
+            self.on_click((event.x - self.ox) / self.zoom / r.width, (event.y - self.oy) / self.zoom / r.height)
 
     def show(self, pdf_bytes):
         self.page = pymupdf.open("pdf", pdf_bytes)[0]
@@ -65,7 +73,7 @@ class Preview(tk.Canvas):
         self.redraw()
 
     def _grab(self, event):
-        self._last = (event.x, event.y)
+        self._last = self._press = (event.x, event.y)
 
     def _drag(self, event):
         self.ox += event.x - self._last[0]
@@ -115,14 +123,18 @@ class App:
         self.tabs = tabs = ttk.Notebook(body)
         form = ttk.Frame(tabs, padding=10)
         holes_tab = ttk.Frame(tabs, padding=(10, 10, 0, 10))
+        marks_tab = ttk.Frame(tabs, padding=10)
         tabs.add(form, text="Drawing")
         tabs.add(holes_tab, text="Holes")
+        tabs.add(marks_tab, text="Surfaces & datums")
         self.preview = Preview(body)
         body.add(tabs, weight=0)
         body.add(self.preview, weight=1)
         self._build_form(form)
         self.hole_list = _scrollable(holes_tab)
         self.hole_vars = {}
+        self.picking = None
+        self._build_marks(marks_tab)
 
         self.status = ttk.Label(root, text="Open a STEP file to start.", anchor="w", padding=(8, 4))
         self.status.pack(fill="x")
@@ -177,6 +189,164 @@ class App:
         self.notes.grid(row=row, column=0, columnspan=2, sticky="we")
         form.columnconfigure(1, weight=1)
 
+    def _build_marks(self, tab):
+        """Surface texture marks and datums, both picked on the preview."""
+        bold = ("TkDefaultFont", 10, "bold")
+        ttk.Label(tab, text="Surface texture (ISO 21920-1)", font=bold).grid(row=0, column=0, columnspan=4,
+                                                                             sticky="w")
+        ttk.Label(tab, text="Surfaces not marked").grid(row=1, column=0, sticky="w", pady=2)
+        self.surface_default = tk.StringVar(value="any")
+        ttk.Combobox(tab, textvariable=self.surface_default, values=partfile.FINISHES, state="readonly",
+                     width=10).grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Label(tab, text="New mark").grid(row=2, column=0, sticky="w", pady=(8, 2))
+        self.mark_finish = tk.StringVar(value="machined")
+        ttk.Combobox(tab, textvariable=self.mark_finish, values=partfile.FINISHES[1:], state="readonly",
+                     width=10).grid(row=2, column=1, sticky="w", padx=4, pady=(8, 2))
+        self.mark_ra = tk.StringVar(value="Ra 1.6")
+        ttk.Entry(tab, textvariable=self.mark_ra, width=10).grid(row=2, column=2, sticky="w", padx=4, pady=(8, 2))
+        ttk.Button(tab, text="Pick surface...", command=lambda: self.start_pick("mark")).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=2)
+        ttk.Label(tab, text="Click the surface in a view (its line, or inside it), then click\n"
+                            "where the symbol and its text should go.", foreground="#555").grid(
+            row=4, column=0, columnspan=4, sticky="w")
+        self.mark_list = ttk.Frame(tab)
+        self.mark_list.grid(row=5, column=0, columnspan=4, sticky="we", pady=(6, 0))
+        ttk.Label(tab, text="Datums (ISO 5459)", font=bold).grid(row=6, column=0, columnspan=4, sticky="w",
+                                                                pady=(16, 2))
+        ttk.Label(tab, text="A: a flat face.  B, C: a hole or waveguide port (click it).\n"
+                            "Hole tables measure from B; position tolerances refer to A|B(|C).",
+                  foreground="#555").grid(row=7, column=0, columnspan=4, sticky="w")
+        self.datum_labels = {}
+        for i, letter in enumerate("ABC"):
+            ttk.Label(tab, text=letter, font=bold).grid(row=8 + i, column=0, sticky="w", pady=2)
+            self.datum_labels[letter] = ttk.Label(tab, text="auto", width=14)
+            self.datum_labels[letter].grid(row=8 + i, column=1, sticky="w")
+            ttk.Button(tab, text="Pick...", command=lambda k=letter: self.start_pick(k)).grid(
+                row=8 + i, column=2, sticky="w", padx=4)
+            ttk.Button(tab, text="Auto" if letter != "C" else "Clear",
+                       command=lambda k=letter: self.set_datum(k, "auto" if k != "C" else None)).grid(
+                row=8 + i, column=3, sticky="w")
+
+    def fill_marks(self):
+        for child in self.mark_list.winfo_children():
+            child.destroy()
+        surfaces = self.cfg.setdefault("surfaces", {"default": "any", "marks": []})
+        for i, m in enumerate(surfaces.get("marks") or []):
+            text = f"{i + 1}. {m.get('finish')} {m.get('ra') or ''} - {m.get('view')} view"
+            ttk.Label(self.mark_list, text=text).grid(row=i, column=0, sticky="w")
+            ttk.Button(self.mark_list, text="Remove", command=lambda k=i: self.remove_mark(k)).grid(
+                row=i, column=1, sticky="w", padx=6)
+        datum = self.cfg.get("datum") or {}
+        tags = (self.info or {}).get("datums", {})
+        for letter, label in self.datum_labels.items():
+            value = datum.get(letter, "auto" if letter != "C" else None)
+            if isinstance(value, (list, tuple)):
+                text = "picked"
+            else:
+                text = "none" if value in (None, "none") else "auto"
+            if letter in tags and letter != "A":
+                text += f" ({', '.join(tags[letter]['tags'])})"
+            label.config(text=text)
+
+    def remove_mark(self, index):
+        del self.cfg["surfaces"]["marks"][index]
+        self.fill_marks()
+        self.generate()
+
+    def set_datum(self, letter, value):
+        self.cfg.setdefault("datum", {})[letter] = value
+        self.fill_marks()
+        self.generate()
+
+    # ------------------------------------------------------------ picking on the preview
+
+    def start_pick(self, what):
+        if not self.info or self.shape is None:
+            self.set_status("Generate the drawing first.")
+            return
+        self.picking = {"what": what}
+        self.preview.on_click = self.on_pick
+        self.preview.config(cursor="crosshair")
+        self.set_status({"mark": "Click the surface in a view...",
+                         "A": "Click datum A's flat face in a view (its line, or inside it)...",
+                         "B": "Click the hole or port that is datum B...",
+                         "C": "Click the hole or port that is datum C..."}[what] + "   (Esc cancels)")
+        self.root.bind("<Escape>", lambda e: self.end_pick("Picking cancelled."))
+
+    def end_pick(self, message=None):
+        self.picking = None
+        self.preview.on_click = None
+        self.preview.config(cursor="")
+        self.root.unbind("<Escape>")
+        if message:
+            self.set_status(message)
+
+    def place_at(self, x, y, details=True):
+        """(name, place) of the view under a paper point; details first (they are enlargements)."""
+        hits = [(name, p) for name, p in self.info["places"].items()
+                if p["rect"][0] - 2 <= x <= p["rect"][2] + 2 and p["rect"][1] - 2 <= y <= p["rect"][3] + 2
+                and (details or "parent" not in p)]
+        hits.sort(key=lambda h: ("parent" not in h[1], (h[1]["rect"][2] - h[1]["rect"][0]) *
+                                 (h[1]["rect"][3] - h[1]["rect"][1])))
+        return hits[0] if hits else (None, None)
+
+    @staticmethod
+    def _to_view(place, x, y):
+        return (x - place["origin"][0]) / place["scale"], (y - place["origin"][1]) / place["scale"]
+
+    @staticmethod
+    def _to_paper(place, point):
+        d, up = place["frame"]
+        right = [up[1] * d[2] - up[2] * d[1], up[2] * d[0] - up[0] * d[2], up[0] * d[1] - up[1] * d[0]]
+        vx = sum(a * b for a, b in zip(point, right))
+        vy = sum(a * b for a, b in zip(point, up))
+        return place["origin"][0] + vx * place["scale"], place["origin"][1] + vy * place["scale"]
+
+    def on_pick(self, fx, fy):
+        w, h = sheet.SHEETS[self.info["sheet"]]
+        x, y = fx * w, (1 - fy) * h  # paper mm
+        p = self.picking
+        if p["what"] == "mark" and "point" in p:  # second click: where the symbol goes
+            tx, ty = p["tip"]
+            self.cfg.setdefault("surfaces", {}).setdefault("marks", []).append(
+                {"finish": self.mark_finish.get(), "ra": self.mark_ra.get().strip(), "view": p["view"],
+                 "point": p["point"], "edge": p["edge"], "at": [round(x - tx, 2), round(y - ty, 2)]})
+            self.end_pick()
+            self.fill_marks()
+            self.generate()
+            return
+        name, place = self.place_at(x, y, details=p["what"] in ("B", "C"))
+        if place is None:
+            self.set_status("That is not on a view: click inside a view (Esc cancels).")
+            return
+        if p["what"] in ("B", "C"):
+            openings = [o for o in self.info["holes"] + self.info["ports"] if o["view"] == place["label"]]
+            near = sorted(((x - px) ** 2 + (y - py) ** 2, o) for o in openings
+                          for px, py in [self._to_paper(place, o["point"])])
+            if not near or near[0][0] > 8 ** 2:
+                self.set_status("No hole or port there: click closer to one (Esc cancels).")
+                return
+            opening = near[0][1]
+            self.cfg.setdefault("datum", {})[p["what"]] = [float(v) for v in opening["point"]]
+            self.end_pick(f"Datum {p['what']}: {opening['tag']}")
+            self.fill_marks()
+            self.generate()
+            return
+        hit = geometry.pick(self.shape, place["frame"], self._to_view(place, x, y), 0.8 / place["scale"],
+                            cut=place.get("cut"))
+        if hit is None:
+            self.set_status("No surface there: click on the part (Esc cancels).")
+            return
+        point = [round(float(v), 4) for v in hit[0]]
+        if p["what"] == "A":
+            self.cfg.setdefault("datum", {})["A"] = point
+            self.end_pick("Datum A picked.")
+            self.fill_marks()
+            self.generate()
+            return
+        p.update(point=point, edge=bool(hit[1]), view=name, tip=self._to_paper(place, point))
+        self.set_status("Now click where the symbol should go (Esc cancels).")
+
     def fill_form(self):
         c = self.cfg
         values = {key: c["title_block"][key] for key, _ in TITLE_FIELDS}
@@ -189,6 +359,7 @@ class App:
         for key, var in self.vars.items():
             var.set(str(values.get(key, "") or ""))
         self.reference.set(bool(c["reference_envelope"]))
+        self.surface_default.set((c.get("surfaces") or {}).get("default", "any"))
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", "\n".join(str(n) for n in c["notes"] or []))
 
@@ -201,7 +372,8 @@ class App:
         c["density"] = v["density"] or None
         c["edges"] = {"external": v["edge_external"], "internal": v["edge_internal"]}
         c["reference_envelope"] = self.reference.get()
-        c["datum"] = {"origin": v["datum_origin"] or "auto", "confirm": False}
+        c.setdefault("datum", {}).update(origin=v["datum_origin"] or "auto", confirm=False)  # keeps picked A/B/C
+        c.setdefault("surfaces", {"marks": []})["default"] = self.surface_default.get() or "any"
         for key, _ in TITLE_FIELDS:
             c["title_block"][key] = v[key]
         c["notes"] = [n.strip() for n in self.notes.get("1.0", "end").splitlines() if n.strip()]
@@ -214,7 +386,7 @@ class App:
             c.setdefault("holes", {})[key] = {
                 "thread": hv["thread"].get().strip(), "thread_depth": depth,
                 "tolerance": hv["tolerance"].get().strip(), "finish": hv["finish"].get().strip(),
-                "confirm": not hv["confirmed"].get()}
+                "position": hv["position"].get().strip(), "confirm": not hv["confirmed"].get()}
 
     def fill_holes(self, types):
         """One block per hole type: thread (suggestions in the list), depth, tolerance, finish."""
@@ -231,7 +403,7 @@ class App:
         for t in types:
             spec = t["spec"]
             hv = {k: tk.StringVar(value="" if spec.get(k) is None else str(spec.get(k)))
-                  for k in ("thread", "thread_depth", "tolerance", "finish")}
+                  for k in ("thread", "thread_depth", "tolerance", "finish", "position")}
             hv["confirmed"] = tk.BooleanVar(value=not spec.get("confirm"))
             self.hole_vars[t["key"]] = hv
             ttk.Label(self.hole_list, text=f"{t['letter']}   {t['count']} x {t['key']}",
@@ -251,6 +423,9 @@ class App:
                 row=row + 2, column=3, sticky="w", padx=4)
             ttk.Checkbutton(self.hole_list, text="confirmed", variable=hv["confirmed"]).grid(
                 row=row + 3, column=0, columnspan=2, sticky="w")
+            ttk.Label(self.hole_list, text="Position").grid(row=row + 3, column=2, sticky="w")
+            ttk.Entry(self.hole_list, textvariable=hv["position"], width=8).grid(
+                row=row + 3, column=3, sticky="w", padx=4)
             if spec.get("note"):
                 ttk.Label(self.hole_list, text=spec["note"], foreground="#555", wraplength=400).grid(
                     row=row + 4, column=0, columnspan=4, sticky="w")
@@ -269,8 +444,11 @@ class App:
         """Open a STEP file; settings come from <name>.yaml next to it when present."""
         yaml_path = path.with_suffix(".yaml")
         self.cfg = partfile.load(yaml_path if yaml_path.exists() else None, path)
+        self.end_pick()
+        self.info = None
         self.fill_form()
         self.fill_holes([])
+        self.fill_marks()
         self.step, self.shape, self.doc = path, None, None
         note = f"   (settings from {yaml_path.name})" if yaml_path.exists() else ""
         self.file_label.config(text=path.name + note)
@@ -298,10 +476,17 @@ class App:
                                    for t in i["hole_types"]}
         self.cfg["holes"] = copy.deepcopy(self.built_cfg["holes"])
         self.fill_holes(i["hole_types"])
+        self.fill_marks()
         msg = (f"{i['sheet']}, scale {sheet.fmt_scale(i['scale'])}, front view {i['front']}, "
                f"up {i['up']}, {len(i['holes'])} holes")
+        if i["ports"]:
+            msg += f", {len(i['ports'])} waveguide port(s)"
+        if i["section"]:
+            msg += f", section {i['section']}"
         if i["extra_views"]:
             msg += ", extra views " + ", ".join(i["extra_views"])
+        if i["warnings"]:
+            msg += "   |   " + "; ".join(w for w in i["warnings"] if "surface mark" in w)
         pending = sum(1 for t in i["hole_types"] if t["spec"].get("confirm"))
         if pending:
             msg += f"   |   {pending} hole type(s) to confirm in the Holes tab"
