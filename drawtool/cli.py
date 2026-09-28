@@ -10,26 +10,30 @@ from . import geometry, partfile, sheet
 
 def analyze(step, out):
     shape = geometry.load_step(step)
-    front, up = geometry.guess_orientation(shape)
+    stem = Path(step).stem
+    yaml_path = out / f"{stem}.yaml"
+    existing = yaml_path.exists()
+    doc, info = sheet.build(shape, partfile.load(yaml_path if existing else None, step))
     features = {
         "source": Path(step).name,
         "units": "mm",
         "envelope": geometry.envelope(shape),
         "volume_mm3": round(geometry.volume(shape), 1),
         "planar_faces": geometry.planar_faces(shape),
-        "views": {"front": front, "up": up},
+        "views": {"front": info["front"], "up": info["up"]},
+        "holes": info["holes"],
     }
-    stem = Path(step).stem
-    (out / f"{stem}.features.json").write_text(json.dumps(features, indent=2))
-    yaml_path = out / f"{stem}.yaml"
-    if yaml_path.exists():
+    (out / f"{stem}.features.json").write_text(json.dumps(features, indent=2, ensure_ascii=False),
+                                               encoding="utf-8")
+    if existing:
         print(f"kept existing {yaml_path} (delete it to regenerate)")
     else:
-        partfile.write_template(yaml_path, step, features)
-    cfg = partfile.load(yaml_path, step)
-    doc, info = sheet.build(shape, cfg)
+        partfile.write_template(yaml_path, step, features, info["hole_types"])
     (out / f"{stem}.preview.png").write_bytes(sheet.render(doc, info["sheet"], "png", dpi=100))
-    print(f"wrote {stem}.features.json, {yaml_path.name}, {stem}.preview.png to {out}")
+    print(f"wrote {stem}.features.json, {yaml_path.name}, {stem}.preview.png to {out} "
+          f"({len(info['holes'])} holes)")
+    for w in info["warnings"]:
+        print(f"to check: {w}", file=sys.stderr)
 
 
 def draw(step, yaml_path, out):
@@ -42,7 +46,9 @@ def draw(step, yaml_path, out):
     (out / f"{stem}.pdf").write_bytes(sheet.render(doc, info["sheet"], "pdf"))
     (out / f"{stem}.png").write_bytes(sheet.render(doc, info["sheet"], "png"))
     print(f"wrote {stem}.dxf/.pdf/.png to {out}  ({info['sheet']}, scale {sheet.fmt_scale(info['scale'])}, "
-          f"front {info['front']}, up {info['up']})")
+          f"front {info['front']}, up {info['up']}, {len(info['holes'])} holes)")
+    for w in info["warnings"]:
+        print(f"warning: {w}", file=sys.stderr)
     for p in info["problems"]:
         print(f"layout problem: {p}", file=sys.stderr)
 

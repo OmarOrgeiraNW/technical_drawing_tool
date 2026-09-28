@@ -6,6 +6,7 @@ rendered from the same DXF, so all three outputs always agree.
 """
 
 import itertools
+from collections import defaultdict
 from pathlib import Path
 
 import ezdxf
@@ -17,7 +18,7 @@ from ezdxf.enums import TextEntityAlignment
 from ezdxf.fonts import fonts
 from ezdxf.math import BoundingBox2d
 
-from . import geometry, partfile
+from . import geometry, holes, partfile
 
 fonts.font_manager.scan_folder(Path(__file__).parent / "fonts")  # same font on every OS
 
@@ -40,7 +41,12 @@ LAYERS = {  # name: (linetype, lineweight in 1/100 mm)
     "DIMS": ("Continuous", 25),
     "TEXT": ("Continuous", 25),
     "FRAME": ("Continuous", 35),
+    "HOLES": ("Continuous", 25),  # hole tags, leaders, table origin, detail letters
 }
+TAG_H = 2.5  # lettering height for hole tags and the hole table
+ROW = 5.0  # hole table row height
+CROWDED = 5.0  # hole centres closer than this on paper get a detail view
+DETAIL_LETTERS = "ZWVUTSRQPNMLKJHGFE"  # from the end of the alphabet, apart from hole types
 
 
 # ---------------------------------------------------------------- layout
@@ -75,7 +81,7 @@ def place(ext, sheet, s, notes_h):
     fw, fh = (v * s for v in _size(ext["front"]))
     lw = _size(ext["left"])[0] * s if "left" in ext else -GAP
     th = _size(ext["top"])[1] * s
-    group_w, group_h = DIM_SPACE + fw + GAP + lw, DIM_SPACE + fh + GAP + th
+    group_w = DIM_SPACE + fw + GAP + lw
     free_w = inner[2] - inner[0]
     for gx, gtop in ((inner[0] + (free_w - group_w) / 2, inner[3]), (inner[0], inner[3])):
         fx, ftop = gx + DIM_SPACE, gtop - DIM_SPACE
@@ -99,8 +105,11 @@ def place(ext, sheet, s, notes_h):
     return None
 
 
-def choose_layout(ext, notes_h, sheet="auto", scale="auto"):
-    """A4 if the part fits at 1:1 or larger, otherwise the best scale on A3."""
+def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None):
+    """A4 if the part fits at 1:1 or larger, otherwise the best scale on A3.
+
+    `block` is the size of the hole tables, which must fit next to the views.
+    """
     if sheet != "auto" and sheet not in SHEETS:
         raise ValueError(f"unknown sheet size '{sheet}': use auto, A4 or A3")
     sheets = ["A4", "A3"] if sheet == "auto" else [sheet]
@@ -108,12 +117,23 @@ def choose_layout(ext, notes_h, sheet="auto", scale="auto"):
     for i, name in enumerate(sheets):
         for s in scales:
             lay = place(ext, name, s, notes_h)
-            if lay is None:
+            if lay is None or (block and not _reserve(lay, block)):
                 continue
             if s >= 1 or i == len(sheets) - 1 or scale != "auto":
                 return lay
             break  # only fits reduced on this sheet: try the next size first
     raise ValueError("views do not fit; set 'sheet' and/or 'scale' in the part YAML")
+
+
+def _reserve(lay, block):
+    """Put the hole tables in the top-right corner of the largest free area."""
+    r, fit = free_rect(lay, block, label=0)
+    if not r or fit < 1:
+        return False
+    x1, y1 = r[2] - PAD, r[3] - PAD
+    lay["table"] = (x1 - block[0], y1 - block[1], x1, y1)
+    lay["zones"].append(lay["table"])
+    return True
 
 
 def free_rect(lay, size, label=H + 4):
@@ -229,7 +249,7 @@ def draw_centre_lines(msp, ext, origin, s, sym, overhang=3):
         msp.add_line((x0 - overhang, cy), (x1 + overhang, cy), dxfattribs=attribs)
 
 
-def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2):
+def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2, pixels=600):
     """Centre crosses on visible full circles and axis lines on visible cylinders.
 
     Hidden features get none (hidden lines are not drawn). Arms that would lie
@@ -237,7 +257,7 @@ def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2):
     """
     d, y = frame
     x = np.cross(y, d)
-    raster = geometry.Raster(lines)
+    raster = geometry.Raster(lines, pixels=pixels)
     tol = 1e-3 * max(_size(ext))
     sym_x = (ext[0] + ext[2]) / 2 if sym[0] else None
     sym_y = (ext[1] + ext[3]) / 2 if sym[1] else None
@@ -284,6 +304,326 @@ def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2):
         p1 = to_paper(base + min(ts) * a2, origin, s) - a2 * overhang
         p2 = to_paper(base + max(ts) * a2, origin, s) + a2 * overhang
         msp.add_line(tuple(p1), tuple(p2), dxfattribs={"layer": "CENTER", "ltscale": 0.25})
+
+
+def plan_holes(found, frames, ortho, ext, sym, cfg):
+    """Give every hole a view (where it is seen as a circle), a type letter and a tag.
+
+    Returns rows (one per hole), types (one per hole type, with the spec in
+    use) and warnings (unconfirmed guesses, holes that fit no view).
+    """
+    rows, warnings = [], []
+    for h in found:
+        best = None
+        for rank, view in enumerate(ortho):
+            d, y = frames[view]
+            if abs(np.dot(h["axis"], d)) < 0.999:
+                continue
+            facing = [e for e in h["entries"] if np.dot(e["out"], d) > 0.999]
+            shown = next((e for e in facing if e["exposed"]), None)
+            option = (shown is None, rank, view, shown or (facing or h["entries"])[0])
+            if best is None or option[:2] < best[:2]:
+                best = option
+        if best is None:
+            warnings.append(f"Ø{holes.fmt(h['diameter'])} hole at {np.round(h['entries'][0]['point'], 2).tolist()}"
+                            " is not square to any view and is left out of the hole table")
+            continue
+        hidden, _, view, entry = best
+        d, y = frames[view]
+        p = entry["point"]
+        rows.append({"hole": h, "entry": entry, "view": view, "hidden": hidden,
+                     "xy": np.array([p @ np.cross(y, d), p @ y]), "key": holes.type_key(h, entry)})
+    first = {}
+    for r in rows:
+        first.setdefault(r["key"], r)
+    keys = sorted(first, key=lambda k: (first[k]["hole"]["diameter"], k))
+    user = cfg.get("holes") or {}
+    types = []
+    for letter, key in zip(_letters(), keys):
+        spec = holes.guess(first[key]["hole"], first[key]["entry"])
+        if key in user:
+            spec = {"thread": "", "thread_depth": None, "tolerance": "", "finish": "", "confirm": False,
+                    "note": spec["note"], **(user[key] or {})}
+        mine = sorted((r for r in rows if r["key"] == key),
+                      key=lambda r: (ortho.index(r["view"]), -round(r["xy"][1], 2), round(r["xy"][0], 2)))
+        for i, r in enumerate(mine, 1):
+            r["tag"] = f"{letter}{i}"
+        h = first[key]["hole"]
+        types.append({"letter": letter, "key": key, "count": len(mine), "spec": spec,
+                      "candidates": holes.thread_candidates(h["diameter"], h["pitch"])})
+        if holes.pending(spec):
+            warnings.append(f"hole type {letter} ({key}): '{holes.pending(spec)}' not confirmed")
+    return rows, types, warnings
+
+
+def _letters():
+    for n in itertools.count(1):
+        for combo in itertools.product("ABCDEFGHJKLMNPQRSTUVWXYZ", repeat=n):
+            yield "".join(combo)
+
+
+def hole_origin(view, frame, ext, sym, datum):
+    """Hole table origin in view coordinates.
+
+    auto: the symmetry centre in a symmetric direction, else the lower/left edge.
+    """
+    origin = (datum or {}).get("origin", "auto")
+    x0, y0, x1, y1 = ext
+    if isinstance(origin, (list, tuple)):
+        d, y = frame
+        p = np.array(origin, float)
+        return np.array([p @ np.cross(y, d), p @ y])
+    if origin == "centre":
+        return np.array([(x0 + x1) / 2, (y0 + y1) / 2])
+    if origin == "corner":
+        return np.array([x0, y0])
+    return np.array([(x0 + x1) / 2 if sym[0] else x0, (y0 + y1) / 2 if sym[1] else y0])
+
+
+def hole_tables(rows, types, ortho, origins, at_centre):
+    """[(title, note, [(tag, X, Y, SIZE, REMARK)])] per view; SIZE on the first row of each type."""
+    specs = {t["key"]: t["spec"] for t in types}
+    tables = []
+    for view in ortho:
+        mine = sorted((r for r in rows if r["view"] == view), key=lambda r: (r["tag"][0], int(r["tag"][1:])))
+        if not mine:
+            continue
+        lines = []
+        for key in dict.fromkeys(r["key"] for r in mine):  # types in tag order
+            group = [r for r in mine if r["key"] == key]
+            first = group[0]
+            size = _wrap(holes.size_text(first["hole"], first["entry"], specs[key]), SIZE_W)
+            for i, r in enumerate(group):
+                x, y = (v if abs(v) >= 0.005 else 0.0 for v in r["xy"] - origins[view])
+                lines.append((r["tag"], f"{x:.2f}", f"{y:.2f}", size[i] if i < len(size) else "",
+                              "hidden" if r["hidden"] else ""))
+            lines += [("", "", "", more, "") for more in size[len(group):]]
+        note = (f"X/Y from the centre lines of the {view} view" if at_centre[view]
+                else f"X/Y from the origin marked in the {view} view")
+        tables.append((f"HOLE TABLE - {view.upper()} VIEW", note, lines))
+    return tables
+
+
+HEADER = ("TAG", "X", "Y", "SIZE", "REMARK")
+SIZE_W = 62  # mm; longer hole descriptions continue on the type's next rows
+
+
+def _wrap(description, width):
+    """Split a hole description at its commas into lines no wider than `width`."""
+    lines = []
+    for part in description.split(", "):
+        if lines and text_width(f"{lines[-1]}, {part}", TAG_H) <= width:
+            lines[-1] = f"{lines[-1]}, {part}"
+        else:
+            if lines:
+                lines[-1] += ","
+            lines.append(part)
+    return lines
+
+
+def table_size(tables):
+    cells = [c for _, _, lines in tables for c in lines] + [HEADER]
+    widths = [max(text_width(c[k], TAG_H) for c in cells) + 3 for k in range(5)]
+    widths[1] = widths[2] = max(widths[1], widths[2], text_width("-00.00", TAG_H) + 3)
+    title_w = max(max(text_width(t, TAG_H + 0.5), text_width(n, TAG_H)) for t, n, _ in tables) + 3
+    widths[3] += max(0, title_w - sum(widths))
+    height = sum(ROW * (len(lines) + 3) for _, _, lines in tables) + PAD * (len(tables) - 1)
+    return widths, (sum(widths), height)
+
+
+def draw_tables(msp, box, tables, widths):
+    x0, top = box[0], box[3]
+    xs = np.cumsum([x0] + widths)
+    for title, note, lines in tables:
+        bottom = top - ROW * (len(lines) + 2)
+        rect(msp, (x0, bottom, xs[-1], top), lw=50)
+        text(msp, title, x0 + 1.5, top - ROW + 1.3, h=TAG_H + 0.5, align="LEFT")
+        for i, row in enumerate([HEADER] + lines):
+            y = top - ROW * (i + 2)
+            msp.add_line((x0, y + ROW), (xs[-1], y + ROW), dxfattribs={"layer": "FRAME"})
+            for k, value in enumerate(row):
+                right = k in (1, 2) and i > 0  # numbers right-aligned
+                text(msp, value, xs[k + 1] - 1.5 if right else xs[k] + 1.5, y + 1.5, h=TAG_H,
+                     align="RIGHT" if right else "LEFT")
+        for xv in xs[1:-1]:
+            msp.add_line((xv, bottom), (xv, top - ROW), dxfattribs={"layer": "FRAME"})
+        text(msp, note, x0, bottom - ROW + 1.5, h=TAG_H, align="LEFT")
+        top = bottom - ROW - PAD
+
+
+def plan_details(rows, lay, ortho):
+    """Enlarged detail views (ISO 128-3) where hole centres crowd on paper.
+
+    Scale: the smallest ISO 5455 scale that puts the closest holes 10 mm apart,
+    stepping down until the detail fits the free space.
+    """
+    s, details, letters = lay["scale"], [], iter(DETAIL_LETTERS)
+    for view in ortho:
+        spots = defaultdict(list)
+        for r in rows:
+            if r["view"] == view:
+                spots[tuple(np.round(r["xy"], 3))].append(r)
+        pts = np.array(list(spots))
+        parent = list(range(len(pts)))
+
+        def root(i):
+            while parent[i] != i:
+                i = parent[i]
+            return i
+
+        for i, j in itertools.combinations(range(len(pts)), 2):
+            if np.hypot(*(pts[i] - pts[j])) * s < CROWDED:
+                parent[root(i)] = root(j)
+        clusters = defaultdict(list)
+        for i in range(len(pts)):
+            clusters[root(i)].append(i)
+        for members in (m for m in clusters.values() if len(m) > 1):
+            p = pts[members]
+            radii = [max(r["hole"]["diameter"] / 2 for r in spots[tuple(q)]) for q in p]
+            centre = (p.min(axis=0) + p.max(axis=0)) / 2
+            R = max(np.hypot(*(q - centre)) + rh for q, rh in zip(p, radii)) * 1.3 + 1.0
+            gap = min(np.hypot(*(a - b)) for a, b in itertools.combinations(p, 2))
+            options = sorted(c for c in SCALES if c >= 2 * s)
+            wanted = next((c for c in options if gap * c >= 10), options[-1] if options else None)
+            for sc in [c for c in options if wanted and c <= wanted][::-1]:
+                size = (2 * R * sc + 2, 2 * R * sc + 10)  # circle plus its label
+                if size[0] > 110:
+                    continue
+                free, fit = free_rect(lay, size, label=0)
+                if not free or fit < 1:
+                    continue
+                cx, cy = (free[0] + free[2]) / 2, (free[1] + free[3]) / 2 - 4
+                box = (cx - size[0] / 2, cy - R * sc - 1, cx + size[0] / 2, cy + R * sc + 9)
+                lay["zones"].append(box)
+                detail = {"view": view, "letter": next(letters), "centre": centre, "R": R,
+                          "scale": sc, "paper": np.array([cx, cy]), "box": box,
+                          "origin": np.array([cx, cy]) - centre * sc}
+                details.append(detail)
+                for q in p:
+                    for r in spots[tuple(q)]:
+                        r["detail"] = detail
+                break
+    return details
+
+
+def draw_details(msp, details, lines, frames, ext, sym, circles, lay):
+    """Circle and letter on the main view; the enlarged, clipped view with its label."""
+    s = lay["scale"]
+    for d in details:
+        view, c, R, sc, o = d["view"], d["centre"], d["R"], d["scale"], d["origin"]
+        mx, my = to_paper(c, np.array(lay["origins"][view]), s)
+        msp.add_circle((mx, my), R * s, dxfattribs={"layer": "DIMS"})
+        text(msp, d["letter"], mx + 0.71 * R * s + 1, my + 0.71 * R * s + 1, h=5, layer="HOLES")
+        clipped = geometry.clip_to_circle(lines[view], c, R)
+        draw_view(msp, clipped, o, sc)
+        msp.add_circle(tuple(d["paper"]), R * sc, dxfattribs={"layer": "DIMS"})
+        text(msp, f"{d['letter']} ({fmt_scale(sc)})", d["paper"][0], d["paper"][1] + R * sc + 3, h=5,
+             align="BOTTOM_CENTER")
+        e = ext[view]
+        for k, on in enumerate(sym[view]):  # symmetry lines crossing the detail
+            at = (e[k] + e[k + 2]) / 2
+            if on and abs(at - c[k]) < R:
+                half = np.sqrt(R * R - (at - c[k]) ** 2)
+                a, b = np.array(c, float), np.array(c, float)
+                a[k] = b[k] = at
+                a[1 - k] -= half
+                b[1 - k] += half
+                msp.add_line(tuple(to_paper(a, o, sc)), tuple(to_paper(b, o, sc)),
+                             dxfattribs={"layer": "CENTER", "ltscale": 0.5})
+        dv, y = frames[view]
+        x = np.cross(y, dv)
+        inside = [(cc, a, r) for cc, a, r in circles if np.hypot(cc @ x - c[0], cc @ y - c[1]) + r < R]
+        if clipped:
+            centre_marks(msp, inside, frames[view], clipped, e, o, sc, sym[view], pixels=150)
+
+
+def origin_symbol(msp, x, y, size=7):
+    """Hole table origin: arrows along the view's +X and +Y."""
+    msp.add_circle((x, y), 0.6, dxfattribs={"layer": "HOLES"})
+    for u, label, align in (((1, 0), "X", "MIDDLE_LEFT"), ((0, 1), "Y", "BOTTOM_CENTER")):
+        u = np.array(u, float)
+        n = np.array([-u[1], u[0]])
+        tip = np.array([x, y]) + size * u
+        msp.add_line((x, y), tuple(tip), dxfattribs={"layer": "HOLES"})
+        msp.add_solid([tuple(tip), tuple(tip - 1.8 * u + 0.5 * n), tuple(tip - 1.8 * u - 0.5 * n)],
+                      dxfattribs={"layer": "HOLES"})
+        text(msp, label, *(tip + 0.8 * u), h=TAG_H, align=align, layer="HOLES")
+
+
+class Occupancy:
+    """What is already drawn, on a 0.25 mm grid, so hole tags go in free space."""
+
+    RES = 0.25
+
+    def __init__(self, lay):
+        w, h = lay["size"]
+        self.grid = np.ones((int(h / self.RES) + 2, int(w / self.RES) + 2), bool)
+        x0, y0, x1, y1 = lay["area"]
+        self.grid[self._i(y0 + 1):self._i(y1 - 1), self._i(x0 + 1):self._i(x1 - 1)] = False
+
+    def _i(self, v):
+        return int(np.clip(v / self.RES, 0, max(self.grid.shape) - 1))
+
+    def points(self, pts):
+        pts = np.asarray(pts, float)
+        cols = np.clip((pts[:, 0] / self.RES).astype(int), 0, self.grid.shape[1] - 1)
+        rows = np.clip((pts[:, 1] / self.RES).astype(int), 0, self.grid.shape[0] - 1)
+        self.grid[rows, cols] = True
+
+    def polyline(self, pts):
+        pts = np.asarray(pts, float)[:, :2]
+        for a, b in zip(pts[:-1], pts[1:]):
+            n = int(np.hypot(*(b - a)) / self.RES) + 2
+            self.points(a + np.linspace(0, 1, n)[:, None] * (b - a))
+
+    def box(self, r):
+        self.grid[self._i(r[1]):self._i(r[3]) + 1, self._i(r[0]):self._i(r[2]) + 1] = True
+
+    def cost(self, r):
+        return int(self.grid[self._i(r[1]):self._i(r[3]) + 1, self._i(r[0]):self._i(r[2]) + 1].sum())
+
+    def entity(self, e):
+        kind = e.dxftype()
+        if kind == "LWPOLYLINE":
+            self.polyline(list(e.get_points("xy")) + ([e[0][:2]] if e.closed else []))
+        elif kind == "LINE":
+            self.polyline([(e.dxf.start.x, e.dxf.start.y), (e.dxf.end.x, e.dxf.end.y)])
+        elif kind in ("CIRCLE", "ARC"):
+            c, r = e.dxf.center, e.dxf.radius
+            a = np.linspace(0, 2 * np.pi, max(12, int(2 * np.pi * r / self.RES)))
+            self.points(np.c_[c[0] + r * np.cos(a), c[1] + r * np.sin(a)])
+        elif kind in ("TEXT", "MTEXT", "SOLID"):
+            b = ezdxf.bbox.extents([e])
+            if b.has_data:
+                self.box((b.extmin.x, b.extmin.y, b.extmax.x, b.extmax.y))
+        elif kind == "DIMENSION":
+            for v in e.virtual_entities():
+                self.entity(v)
+
+
+def place_tags(msp, occ, marks):
+    """Tag text next to each hole in the freest spot; farther out with a leader if crowded."""
+    for tag, cx, cy, rp in marks:
+        w, h = text_width(tag, TAG_H), TAG_H * 1.29
+        best = None
+        for ring, gap in enumerate((0.8, 4.0, 8.0)):
+            for k, angle in enumerate((45, 135, -45, -135, 0, 180, 90, -90)):
+                u = np.array([np.cos(np.radians(angle)), np.sin(np.radians(angle))])
+                dist = rp + gap + 0.5 * abs(w * u[0]) + 0.5 * abs(h * u[1])
+                bx, by = cx + dist * u[0], cy + dist * u[1]
+                box = (bx - w / 2, by - h / 2, bx + w / 2, by + h / 2)
+                # a line through a tag costs far more than moving it out on a leader
+                cost = 10 * occ.cost((box[0] - 0.3, box[1] - 0.3, box[2] + 0.3, box[3] + 0.3)) + 60 * ring + k
+                if best is None or cost < best[0]:
+                    best = (cost, box, ring, u)
+        _, box, ring, u = best
+        text(msp, tag, box[0], box[1] + 0.29 * TAG_H, h=TAG_H, align="LEFT", layer="HOLES")
+        occ.box(box)
+        if ring:
+            start = (cx + rp * u[0], cy + rp * u[1])
+            end = (np.clip(cx, box[0], box[2]), np.clip(cy, box[1], box[3]))
+            msp.add_line(start, end, dxfattribs={"layer": "HOLES"})
+            occ.polyline([start, end])
 
 
 def _extreme_point(polylines, axis, low, pick_high):
@@ -458,22 +798,31 @@ def build(shape, cfg):
         ortho.remove("left")  # e.g. a turned part: the side view repeats the front view
         del ext["left"]
 
+    sym = {name: geometry.symmetry(lines[name]) for name in ortho}
+    rows, types, warnings = plan_holes(geometry.holes(shape), frames, ortho, ext, sym, cfg)
+    origins = {v: hole_origin(v, frames[v], ext[v], sym[v], cfg.get("datum")) for v in ortho}
+    at_centre = {v: bool(sym[v][0] and sym[v][1] and np.allclose(
+        origins[v], ((ext[v][0] + ext[v][2]) / 2, (ext[v][1] + ext[v][3]) / 2), atol=1e-6)) for v in ortho}
+    tables = hole_tables(rows, types, ortho, origins, at_centre)
+    widths, block = table_size(tables) if tables else (None, None)
+    if rows and (cfg.get("datum") or {}).get("confirm"):
+        warnings.append("datum.confirm is still true - check the hole table origin")
+
     notes = general_notes(cfg) + list(cfg["notes"] or [])
-    lay = choose_layout(ext, notes_height(notes), cfg["sheet"], cfg["scale"])
+    lay = choose_layout(ext, notes_height(notes), cfg["sheet"], cfg["scale"], block)
     s = lay["scale"]
     doc = new_doc()
     msp = doc.modelspace()
     draw_frame(msp, lay)
 
     info = {"sheet": lay["sheet"], "scale": s, "front": front, "up": up, "views": ortho,
-            "dims": [], "view_rects": dict(lay["rects"])}
+            "dims": [], "view_rects": dict(lay["rects"]), "warnings": warnings}
     circles = geometry.circles(shape)
     for name in ortho:
         o = np.array(lay["origins"][name])
-        sym = geometry.symmetry(lines[name])
         draw_view(msp, lines[name], o, s)
-        draw_centre_lines(msp, ext[name], o, s, sym)
-        centre_marks(msp, circles, frames[name], lines[name], ext[name], o, s, sym)
+        draw_centre_lines(msp, ext[name], o, s, sym[name])
+        centre_marks(msp, circles, frames[name], lines[name], ext[name], o, s, sym[name])
 
     # overall envelope: width, height, depth once each; one Ø on a round view instead of two sizes
     round_view = next((v for v in ortho if geometry.is_round(lines[v], ext[v])), None)
@@ -488,6 +837,11 @@ def build(shape, cfg):
         value = prefix.replace("%%c", "Ø") + str(round(dim.get_measurement() / s, 4))
         info["dims"].append((view, f"({value})" if ref else value))
 
+    details = plan_details(rows, lay, ortho) if rows else []
+    for d in details:  # the detail circle itself; its label sits above it
+        cx, cy, rr = *d["paper"], d["R"] * d["scale"]
+        info["view_rects"][f"detail {d['letter']}"] = (cx - rr, cy - rr, cx + rr, cy + rr)
+
     iso_w, iso_h = _size(ext["iso"])
     r, fit = free_rect(lay, (iso_w, iso_h))
     iso_scale = next((c for c in SCALES if c <= min(s, fit)), None) if r else None
@@ -501,12 +855,66 @@ def build(shape, cfg):
             text(msp, f"ISOMETRIC  {fmt_scale(iso_scale)}", cx, info["view_rects"]["iso"][1] - 2,
                  align="TOP_CENTER")
 
+    draw_details(msp, details, lines, frames, ext, sym, circles, lay)
+    draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details)
+    info["holes"] = [{"tag": r["tag"], "type": r["key"], "view": r["view"], "hidden": bool(r["hidden"]),
+                      "x": round(float(r["xy"][0] - origins[r["view"]][0]), 3),
+                      "y": round(float(r["xy"][1] - origins[r["view"]][1]), 3),
+                      "point": np.round(r["entry"]["point"], 3).tolist(),
+                      "axis": np.round(r["hole"]["axis"], 4).tolist(),
+                      "diameter": round(r["hole"]["diameter"], 3), "through": r["hole"]["through"],
+                      "depth": None if r["entry"]["depth"] is None else round(r["entry"]["depth"], 3),
+                      "pitch": r["hole"]["pitch"], "colours": r["hole"]["colours"]}
+                     for r in sorted(rows, key=lambda r: (r["tag"][0], int(r["tag"][1:])))]
+    info["hole_types"] = types
+    info["details"] = [f"{d['letter']} ({fmt_scale(d['scale'])}) on the {d['view']} view" for d in details]
+
     grams = mass_grams(shape, cfg)
     info["mass_g"] = grams
     title_block(msp, lay, cfg, fmt_mass(grams))
     draw_notes(msp, lay, notes)
     info["problems"] = check(doc, info, lay)
     return doc, info
+
+
+def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details):
+    """Hidden holes dashed, ISO 6410 thread arcs, table origins, tags and the tables.
+
+    Holes inside a detail view are annotated there, at the detail's scale.
+    """
+    if not rows:
+        return
+    specs = {t["key"]: t["spec"] for t in types}
+    spots = {}  # holes drawn on the same spot (near and far side) share one tag
+    for r in rows:
+        d = r.get("detail")
+        o, s = (d["origin"], d["scale"]) if d else (np.array(lay["origins"][r["view"]]), lay["scale"])
+        cx, cy = to_paper(r["xy"], o, s)
+        rp = r["hole"]["diameter"] / 2 * s
+        spec = specs[r["key"]]
+        if r["hidden"]:
+            msp.add_circle((cx, cy), rp, dxfattribs={"layer": "HIDDEN", "ltscale": 0.25})
+        elif spec.get("thread") and not spec.get("confirm"):
+            major = holes.thread_major(str(spec["thread"]))
+            if major and major > r["hole"]["diameter"]:  # thin 3/4 circle, open at the top right
+                msp.add_arc((cx, cy), major / 2 * s, 100, 350, dxfattribs={"layer": "VISIBLE", "lineweight": 25})
+        key = (r["view"], round(cx, 1), round(cy, 1))
+        spots.setdefault(key, [[], cx, cy, rp])[0].append(r["tag"])
+        spots[key][3] = max(spots[key][3], rp)
+    for view in {r["view"] for r in rows}:
+        if not at_centre[view]:
+            inside = [d for d in details if d["view"] == view
+                      and np.hypot(*(origins[view] - d["centre"])) < d["R"]]
+            o, s = ((inside[0]["origin"], inside[0]["scale"]) if inside
+                    else (np.array(lay["origins"][view]), lay["scale"]))
+            origin_symbol(msp, *to_paper(origins[view], o, s))
+    occ = Occupancy(lay)
+    for e in msp:
+        occ.entity(e)
+    occ.box(lay["title_block"])
+    occ.box(lay["table"])
+    place_tags(msp, occ, [(", ".join(tags), cx, cy, rp) for tags, cx, cy, rp in spots.values()])
+    draw_tables(msp, lay["table"], tables, widths)
 
 
 def mass_grams(shape, cfg):
@@ -525,20 +933,21 @@ def check(doc, info, lay):
     boxes = []
     for e in doc.modelspace():
         if e.dxftype() == "TEXT" and e.dxf.layer != "FRAME":  # grid labels sit in the margin
-            boxes.append((e.dxf.text, ezdxf.bbox.extents([e])))
+            boxes.append((e.dxf.text, ezdxf.bbox.extents([e]), e.dxf.layer))
         elif e.dxftype() == "DIMENSION":
             for v in e.virtual_entities():
                 if v.dxftype() in ("MTEXT", "TEXT"):
                     boxes.append((v.plain_text() if v.dxftype() == "MTEXT" else v.dxf.text,
-                                  ezdxf.bbox.extents([v])))
-    boxes = [(t, (b.extmin.x, b.extmin.y, b.extmax.x, b.extmax.y)) for t, b in boxes if b.has_data]
+                                  ezdxf.bbox.extents([v]), "DIMS"))
+    boxes = [(t, (b.extmin.x, b.extmin.y, b.extmax.x, b.extmax.y), layer) for t, b, layer in boxes
+             if b.has_data]
     problems = []
-    for (ta, a), (tb, b) in itertools.combinations(boxes, 2):
+    for (ta, a, _), (tb, b, _) in itertools.combinations(boxes, 2):
         if _overlap(a, b, -0.05):
             problems.append(f"text '{ta}' overlaps text '{tb}'")
-    for t, a in boxes:
+    for t, a, layer in boxes:
         for name, r in info["view_rects"].items():
-            if _overlap(a, r):
+            if layer != "HOLES" and _overlap(a, r):  # hole tags belong on their view
                 problems.append(f"text '{t}' overlaps {name} view")
         if not _inside(a, lay["area"]):
             problems.append(f"text '{t}' outside frame")

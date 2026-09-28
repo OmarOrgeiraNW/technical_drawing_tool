@@ -21,6 +21,7 @@ from . import cli, geometry, partfile, sheet
 DIRECTIONS = ["auto", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
 SHEETS = ["auto", "A4", "A3"]
 SCALES = ["auto", "5:1", "2:1", "1:1", "1:2", "1:5", "1:10"]
+ORIGINS = ["auto", "centre", "corner"]
 TITLE_FIELDS = [("title", "Title"), ("part_number", "Part number"), ("revision", "Revision"),
                 ("material", "Material"), ("drawn_by", "Created by"), ("approved_by", "Approved by"),
                 ("company", "Legal owner"), ("date", "Date of issue"), ("status", "Status")]
@@ -111,11 +112,17 @@ class App:
 
         body = ttk.Panedwindow(root, orient="horizontal")
         body.pack(fill="both", expand=True)
-        form = ttk.Frame(body, padding=10)
+        self.tabs = tabs = ttk.Notebook(body)
+        form = ttk.Frame(tabs, padding=10)
+        holes_tab = ttk.Frame(tabs, padding=(10, 10, 0, 10))
+        tabs.add(form, text="Drawing")
+        tabs.add(holes_tab, text="Holes")
         self.preview = Preview(body)
-        body.add(form, weight=0)
+        body.add(tabs, weight=0)
         body.add(self.preview, weight=1)
         self._build_form(form)
+        self.hole_list = _scrollable(holes_tab)
+        self.hole_vars = {}
 
         self.status = ttk.Label(root, text="Open a STEP file to start.", anchor="w", padding=(8, 4))
         self.status.pack(fill="x")
@@ -152,6 +159,7 @@ class App:
         field("up", "Up direction", DIRECTIONS)
         field("sheet", "Sheet", SHEETS)
         field("scale", "Scale", SCALES)
+        field("datum_origin", "Hole table origin", ORIGINS)
         heading("Title block")
         for key, label in TITLE_FIELDS:
             field(key, label)
@@ -176,7 +184,8 @@ class App:
         values.update(front=c["views"]["front"], up=c["views"]["up"], sheet=c["sheet"],
                       scale=c["scale"], general_tolerance=c["general_tolerance"],
                       default_finish=c["default_finish"], density=c["density"],
-                      edge_external=edges.get("external"), edge_internal=edges.get("internal"))
+                      edge_external=edges.get("external"), edge_internal=edges.get("internal"),
+                      datum_origin=(c.get("datum") or {}).get("origin", "auto"))
         for key, var in self.vars.items():
             var.set(str(values.get(key, "") or ""))
         self.reference.set(bool(c["reference_envelope"]))
@@ -192,9 +201,60 @@ class App:
         c["density"] = v["density"] or None
         c["edges"] = {"external": v["edge_external"], "internal": v["edge_internal"]}
         c["reference_envelope"] = self.reference.get()
+        c["datum"] = {"origin": v["datum_origin"] or "auto", "confirm": False}
         for key, _ in TITLE_FIELDS:
             c["title_block"][key] = v[key]
         c["notes"] = [n.strip() for n in self.notes.get("1.0", "end").splitlines() if n.strip()]
+        for key, hv in self.hole_vars.items():
+            depth = hv["thread_depth"].get().strip()
+            try:
+                depth = float(depth) if depth else None
+            except ValueError:
+                depth = None
+            c.setdefault("holes", {})[key] = {
+                "thread": hv["thread"].get().strip(), "thread_depth": depth,
+                "tolerance": hv["tolerance"].get().strip(), "finish": hv["finish"].get().strip(),
+                "confirm": not hv["confirmed"].get()}
+
+    def fill_holes(self, types):
+        """One block per hole type: thread (suggestions in the list), depth, tolerance, finish."""
+        for child in self.hole_list.winfo_children():
+            child.destroy()
+        self.hole_vars = {}
+        if not types:
+            ttk.Label(self.hole_list, text="No drilled holes found.").grid(row=0, column=0, sticky="w")
+            return
+        ttk.Label(self.hole_list, text="Thread, tolerance and finish show on the drawing\n"
+                                       "only when the hole type is ticked as confirmed.",
+                  foreground="#555").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        row = 1
+        for t in types:
+            spec = t["spec"]
+            hv = {k: tk.StringVar(value="" if spec.get(k) is None else str(spec.get(k)))
+                  for k in ("thread", "thread_depth", "tolerance", "finish")}
+            hv["confirmed"] = tk.BooleanVar(value=not spec.get("confirm"))
+            self.hole_vars[t["key"]] = hv
+            ttk.Label(self.hole_list, text=f"{t['letter']}   {t['count']} x {t['key']}",
+                      font=("TkDefaultFont", 10, "bold")).grid(row=row, column=0, columnspan=4,
+                                                               sticky="w", pady=(8, 2))
+            ttk.Label(self.hole_list, text="Thread").grid(row=row + 1, column=0, sticky="w")
+            ttk.Combobox(self.hole_list, textvariable=hv["thread"], values=[""] + t["candidates"],
+                         width=16).grid(row=row + 1, column=1, sticky="w", padx=(4, 8))
+            ttk.Label(self.hole_list, text="Depth").grid(row=row + 1, column=2, sticky="w")
+            ttk.Entry(self.hole_list, textvariable=hv["thread_depth"], width=6).grid(
+                row=row + 1, column=3, sticky="w", padx=4)
+            ttk.Label(self.hole_list, text="Tolerance").grid(row=row + 2, column=0, sticky="w")
+            ttk.Entry(self.hole_list, textvariable=hv["tolerance"], width=8).grid(
+                row=row + 2, column=1, sticky="w", padx=(4, 8))
+            ttk.Label(self.hole_list, text="Finish").grid(row=row + 2, column=2, sticky="w")
+            ttk.Entry(self.hole_list, textvariable=hv["finish"], width=8).grid(
+                row=row + 2, column=3, sticky="w", padx=4)
+            ttk.Checkbutton(self.hole_list, text="confirmed", variable=hv["confirmed"]).grid(
+                row=row + 3, column=0, columnspan=2, sticky="w")
+            if spec.get("note"):
+                ttk.Label(self.hole_list, text=spec["note"], foreground="#555", wraplength=400).grid(
+                    row=row + 4, column=0, columnspan=4, sticky="w")
+            row += 5
 
     # ------------------------------------------------------------ actions
 
@@ -210,6 +270,7 @@ class App:
         yaml_path = path.with_suffix(".yaml")
         self.cfg = partfile.load(yaml_path if yaml_path.exists() else None, path)
         self.fill_form()
+        self.fill_holes([])
         self.step, self.shape, self.doc = path, None, None
         note = f"   (settings from {yaml_path.name})" if yaml_path.exists() else ""
         self.file_label.config(text=path.name + note)
@@ -233,7 +294,15 @@ class App:
         self.shape, self.doc, self.info, self.pdf, self.built_cfg = result
         self.preview.show(self.pdf)
         i = self.info
-        msg = f"{i['sheet']}, scale {sheet.fmt_scale(i['scale'])}, front view {i['front']}, up {i['up']}"
+        self.built_cfg["holes"] = {t["key"]: {k: v for k, v in t["spec"].items() if k != "note"}
+                                   for t in i["hole_types"]}
+        self.cfg["holes"] = copy.deepcopy(self.built_cfg["holes"])
+        self.fill_holes(i["hole_types"])
+        msg = (f"{i['sheet']}, scale {sheet.fmt_scale(i['scale'])}, front view {i['front']}, "
+               f"up {i['up']}, {len(i['holes'])} holes")
+        pending = sum(1 for t in i["hole_types"] if t["spec"].get("confirm"))
+        if pending:
+            msg += f"   |   {pending} hole type(s) to confirm in the Holes tab"
         if i["problems"]:
             msg += "   |   layout problems: " + "; ".join(i["problems"])
         self.set_status(msg)
@@ -294,6 +363,19 @@ class App:
 
     def set_status(self, text):
         self.status.config(text=text)
+
+
+def _scrollable(parent):
+    """A frame inside a canvas with a vertical scrollbar."""
+    canvas = tk.Canvas(parent, highlightthickness=0, width=450)
+    bar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+    inner = ttk.Frame(canvas)
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=bar.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    bar.pack(side="right", fill="y")
+    return inner
 
 
 def main(argv=None):

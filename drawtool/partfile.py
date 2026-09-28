@@ -1,6 +1,7 @@
 """part.yaml: defaults, loading, and the pre-filled template written by `analyze`."""
 
 import datetime
+import json
 from pathlib import Path
 
 import yaml
@@ -32,6 +33,8 @@ def defaults(step_path):
         "edges": {"external": "-0.3", "internal": "+0.3"},
         "density": None,
         "views": {"front": "auto", "up": "auto", "iso": "auto", "confirm": False},
+        "datum": {"origin": "auto", "confirm": False},
+        "holes": {},
         "notes": [],
     }
 
@@ -55,7 +58,7 @@ def density(cfg):
 def load(yaml_path, step_path):
     cfg = defaults(step_path)
     if yaml_path:
-        user = yaml.safe_load(Path(yaml_path).read_text()) or {}
+        user = yaml.safe_load(Path(yaml_path).read_text(encoding="utf-8")) or {}
         for key, value in user.items():
             if isinstance(value, dict) and isinstance(cfg.get(key), dict):
                 cfg[key].update(value)
@@ -102,15 +105,42 @@ views:
   iso: auto                    # or a direction such as "+X-Y+Z"
   confirm: true
 
+datum:
+  origin: auto                 # hole table origin: auto (centre lines where symmetric, else the
+                               # lower/left edge) | centre | corner | [x, y, z] in model coordinates
+  confirm: {datum_confirm}
+
+{holes}
 notes: []                      # your own notes, after the standard ones, e.g.
 #  - "Stress relieved after printing."
 """
 
 
-def write_template(path, step_path, features):
+def _holes_yaml(types):
+    """One entry per hole type, keyed by its size so it survives geometry changes."""
+    if not types:
+        return "holes: {}                      # no drilled holes found\n"
+    out = ["holes:                         # per hole type; thread, tolerance and finish appear on",
+           "                               # the drawing only once confirm is set to false"]
+    for t in types:
+        spec = t["spec"]
+        note = f"; {spec['note']}" if spec.get("note") else ""
+        depth = spec.get("thread_depth")
+        out += [f"  {json.dumps(t['key'], ensure_ascii=False)}:    # {t['letter']}: {t['count']} hole(s){note}",
+                f"    thread: {json.dumps(spec.get('thread') or '')}",
+                f"    thread_depth: {'' if depth is None else depth}",
+                f"    tolerance: {json.dumps(spec.get('tolerance') or '')}",
+                f"    finish: {json.dumps(spec.get('finish') or '')}",
+                f"    confirm: {'true' if spec.get('confirm') else 'false'}"]
+    return "\n".join(out) + "\n"
+
+
+def write_template(path, step_path, features, hole_types=()):
     step_path = Path(step_path)
     face = features["planar_faces"][0] if features["planar_faces"] else {"area": 0, "normal": []}
     Path(path).write_text(TEMPLATE.format(
         name=step_path.name, step=step_path.name, yaml_name=Path(path).name, stem=step_path.stem,
         today=datetime.date.today().isoformat(), front=features["views"]["front"],
-        up=features["views"]["up"], area=face["area"]))
+        up=features["views"]["up"], area=face["area"],
+        datum_confirm="true" if hole_types else "false", holes=_holes_yaml(hole_types)),
+        encoding="utf-8")

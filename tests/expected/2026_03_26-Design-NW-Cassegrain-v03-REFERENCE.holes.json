@@ -1,0 +1,308 @@
+[
+ {
+  "tag": "A1",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   -3.175,
+   -11.056,
+   -37.711
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A2",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   -3.175,
+   11.056,
+   -37.711
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A3",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   3.175,
+   -11.056,
+   -37.711
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A4",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   3.175,
+   11.056,
+   -37.711
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A5",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   -3.175,
+   -11.056,
+   -44.061
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A6",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   -3.175,
+   11.056,
+   -44.061
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A7",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   3.175,
+   -11.056,
+   -44.061
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "A8",
+  "type": "Ø1.25 depth 6.50",
+  "diameter": 1.25,
+  "through": false,
+  "depth": 6.5,
+  "point": [
+   3.175,
+   11.056,
+   -44.061
+  ],
+  "axis": [
+   0.0,
+   1.0,
+   -0.0
+  ]
+ },
+ {
+  "tag": "B1",
+  "type": "Ø2.00 THRU",
+  "diameter": 2.0,
+  "through": true,
+  "depth": null,
+  "point": [
+   0.0,
+   -11.056,
+   -40.886
+  ],
+  "axis": [
+   -0.0,
+   1.0,
+   0.0
+  ]
+ },
+ {
+  "tag": "B2",
+  "type": "Ø2.00 THRU",
+  "diameter": 2.0,
+  "through": true,
+  "depth": null,
+  "point": [
+   0.0,
+   3.556,
+   -40.886
+  ],
+  "axis": [
+   -0.0,
+   1.0,
+   0.0
+  ]
+ },
+ {
+  "tag": "C1",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   0.0,
+   72.694,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C2",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   -51.402,
+   51.402,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C3",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   51.402,
+   51.402,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C4",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   -72.694,
+   -0.0,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C5",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   72.694,
+   0.0,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C6",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   -51.402,
+   -51.402,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C7",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   51.402,
+   -51.402,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ },
+ {
+  "tag": "C8",
+  "type": "Ø4.20 depth 8.68",
+  "diameter": 4.2,
+  "through": false,
+  "depth": 8.681,
+  "point": [
+   0.0,
+   -72.694,
+   1.8
+  ],
+  "axis": [
+   -0.0,
+   0.0,
+   1.0
+  ]
+ }
+]
