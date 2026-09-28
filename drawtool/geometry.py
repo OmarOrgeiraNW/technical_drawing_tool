@@ -3,11 +3,11 @@
 import numpy as np
 from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.GeomAbs import GeomAbs_Plane
+from OCP.GeomAbs import GeomAbs_Circle, GeomAbs_Plane
 from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
 from OCP.GProp import GProp_GProps
 from OCP.HLRAlgo import HLRAlgo_Projector
@@ -17,6 +17,7 @@ from OCP.STEPControl import STEPControl_Reader
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
 from OCP.TopExp import TopExp, TopExp_Explorer
 from OCP.TopoDS import TopoDS
+from OCP.collections import IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher as ShapeMap
 
 AXES = {
     "+X": (1, 0, 0), "-X": (-1, 0, 0),
@@ -72,21 +73,33 @@ def nearest_axis(v):
     return ("+" if v[i] > 0 else "-") + "XYZ"[i]
 
 
-def guess_orientation(shape):
-    """Front view looks at the largest flat face.
+FRONT_PREFERENCE = ["-Y", "+X", "+Y", "-X", "+Z", "-Z"]  # tie-break: conventional front first
 
-    'up' is +Z (or +Y when looking along Z) unless that makes the front view
-    clearly portrait, in which case the shorter side is turned vertical.
+
+def guess_orientation(shape):
+    """(front, up) for the principal views.
+
+    The largest flat face becomes the base (drawn at the bottom) when it covers
+    a good part of the footprint, as a flange does; otherwise +Z stays up.
+    The front view is the most informative of the four horizontal views
+    (ISO 128-3), measured as total visible edge length.
     """
+    env = envelope(shape)
+    up = np.array([0.0, 0.0, 1.0])
     faces = planar_faces(shape, 1)
-    front = nearest_axis(faces[0]["normal"]) if faces else "-Y"
-    size = envelope(shape)["size"]
-    f = "XYZ".index(front[1])
-    up = 1 if f == 2 else 2
-    across = 3 - f - up
-    if size[up] > 1.1 * size[across]:
-        up = across
-    return front, "+" + "XYZ"[up]
+    if faces:
+        n = np.array(faces[0]["normal"])
+        i = int(np.argmax(np.abs(n)))
+        across = [env["size"][k] for k in range(3) if k != i]
+        if faces[0]["area"] >= 0.3 * across[0] * across[1]:
+            up = -np.sign(n[i]) * np.eye(3)[i]
+    prepare(shape)
+    candidates = [a for a in FRONT_PREFERENCE if abs(np.dot(AXES[a], up)) < 0.5]
+    detail = {a: sum(np.hypot(*np.diff(pl, axis=0).T).sum()
+                     for pl in project(shape, np.array(AXES[a], float), up)) for a in candidates}
+    best = max(detail.values())
+    front = next(a for a in candidates if detail[a] >= 0.95 * best)
+    return front, nearest_axis(up)
 
 
 def view_frames(front, up, iso=None):
@@ -119,16 +132,37 @@ def _parse_direction(text):
     return v
 
 
-def mesh(shape, deflection):
-    BRepMesh_IncrementalMesh(shape, deflection, False, 0.2, True)
+def prepare(shape):
+    """Mesh the shape for projection (fine enough for any drawing scale)."""
+    BRepMesh_IncrementalMesh(shape, max(envelope(shape)["size"]) / 5000, False, 0.2, True)
+
+
+def volume(shape):
+    """mm3. Adaptive integration: the default Gauss rule is ~2 % off on large spline parts."""
+    props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape, props, 1e-4, True)
+    return props.Mass()
+
+
+_projections = {"shape": None, "views": {}}
 
 
 def project(shape, direction, up):
     """Visible sharp edges and silhouettes as 2D polylines (model units).
 
     Uses the polygonal HLR algorithm: ~1 s per view even on 2000+ face LPBF parts,
-    where the exact algorithm takes minutes. Call mesh() first.
+    where the exact algorithm takes minutes. Call prepare() first. Results are
+    cached for the current shape, so orientation search and drawing share them.
     """
+    if _projections["shape"] is not shape:
+        _projections.update(shape=shape, views={})
+    key = (tuple(np.round(direction, 6)), tuple(np.round(up, 6)))
+    if key not in _projections["views"]:
+        _projections["views"][key] = _project(shape, direction, up)
+    return _projections["views"][key]
+
+
+def _project(shape, direction, up):
     ax = gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(*direction))
     ax.SetYDirection(gp_Dir(*up))
     algo = HLRBRep_PolyAlgo()
@@ -195,26 +229,82 @@ def is_round(polylines, ext, tol=0.005):
     return len(sectors) >= 34
 
 
-def symmetry(polylines, pixels=600, threshold=0.85):
+class Raster:
+    """A view's visible lines drawn into a boolean pixel grid (plus a 1 px dilated copy)."""
+
+    def __init__(self, polylines, ext=None, pixels=600):
+        self.x0, self.y0, x1, y1 = ext or extents(polylines)
+        self.step = max(x1 - self.x0, y1 - self.y0) / pixels
+        nx, ny = int((x1 - self.x0) / self.step) + 1, int((y1 - self.y0) / self.step) + 1
+        self.img = np.zeros((ny + 2, nx + 2), bool)
+        for pl in polylines:
+            for a, b in zip(pl[:-1], pl[1:]):
+                n = int(np.hypot(*(b - a)) / self.step) + 2
+                p = a + np.linspace(0, 1, n)[:, None] * (b - a)
+                self.img[self._rows(p[:, 1]), self._cols(p[:, 0])] = True
+        self.fat = self.img.copy()  # absorbs mesh differences
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                self.fat |= np.roll(np.roll(self.img, dy, 0), dx, 1)
+
+    def _rows(self, y):
+        return np.clip(((y - self.y0) / self.step).astype(int) + 1, 0, self.img.shape[0] - 1)
+
+    def _cols(self, x):
+        return np.clip(((x - self.x0) / self.step).astype(int) + 1, 0, self.img.shape[1] - 1)
+
+    def coverage(self, points):
+        """Fraction of 2D points lying on drawn lines."""
+        points = np.asarray(points)
+        return self.fat[self._rows(points[:, 1]), self._cols(points[:, 0])].mean()
+
+
+def _match(a, b):
+    """Fraction of a's line pixels that fall on b's lines (grids cropped to a common size)."""
+    ny, nx = min(a.shape[0], b.shape[0]), min(a.shape[1], b.shape[1])
+    a = a[:ny, :nx]
+    return (a & b[:ny, :nx]).sum() / max(a.sum(), 1)
+
+
+def symmetry(polylines, threshold=0.85):
     """(mirror about vertical centre line, mirror about horizontal centre line).
 
-    Rasterises the view and compares it with its mirror image, so small
-    asymmetric details (engraved text, lattice nodes) are tolerated.
+    Compares the rasterised view with its mirror image, so small asymmetric
+    details (engraved text, lattice nodes) are tolerated.
     """
-    x0, y0, x1, y1 = extents(polylines)
-    step = max(x1 - x0, y1 - y0) / pixels
-    nx, ny = int((x1 - x0) / step) + 1, int((y1 - y0) / step) + 1
-    img = np.zeros((ny + 2, nx + 2), bool)
-    for pl in polylines:
-        for a, b in zip(pl[:-1], pl[1:]):
-            n = int(np.hypot(*(b - a)) / step) + 2
-            t = np.linspace(0, 1, n)[:, None]
-            p = a + t * (b - a)
-            img[((p[:, 1] - y0) / step).astype(int) + 1, ((p[:, 0] - x0) / step).astype(int) + 1] = True
-    fat = img.copy()  # dilate 1 px to absorb mesh differences
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            fat |= np.roll(np.roll(img, dy, 0), dx, 1)
-    total = img.sum()
-    return (bool((img[:, ::-1] & fat).sum() >= threshold * total),
-            bool((img[::-1, :] & fat).sum() >= threshold * total))
+    r = Raster(polylines)
+    return (bool(_match(r.img[:, ::-1], r.fat) >= threshold),
+            bool(_match(r.img[::-1, :], r.fat) >= threshold))
+
+
+def same_view(a, b, ext_a, ext_b, threshold=0.85):
+    """True when two views show (nearly) the same picture, directly or mirrored."""
+    wa, ha = ext_a[2] - ext_a[0], ext_a[3] - ext_a[1]
+    wb, hb = ext_b[2] - ext_b[0], ext_b[3] - ext_b[1]
+    if abs(wa - wb) > 0.02 * max(wa, wb) or abs(ha - hb) > 0.02 * max(ha, hb):
+        return False
+    ra, rb = Raster(a, ext_a), Raster(b, ext_b)
+    for img_b, fat_b in ((rb.img, rb.fat), (rb.img[:, ::-1], rb.fat[:, ::-1])):
+        if min(_match(ra.img, fat_b), _match(img_b, ra.fat)) >= threshold:
+            return True
+    return False
+
+
+def circles(shape):
+    """Full circles on the part as (centre, unit axis, radius); split arcs are joined."""
+    edges = ShapeMap()
+    TopExp.MapShapes_s(shape, TopAbs_EDGE, edges)  # each edge once
+    spans = {}
+    for i in range(1, edges.Extent() + 1):
+        curve = BRepAdaptor_Curve(TopoDS.Edge(edges.FindKey(i)))
+        if curve.GetType() != GeomAbs_Circle:
+            continue
+        circ = curve.Circle()
+        centre = np.array(circ.Axis().Location().Coord())
+        axis = np.array(circ.Axis().Direction().Coord())
+        if axis[np.argmax(np.abs(axis))] < 0:
+            axis = -axis
+        key = (tuple(np.round(centre, 3)), tuple(np.round(axis, 4)), round(circ.Radius(), 4))
+        spans[key] = spans.get(key, 0.0) + abs(curve.LastParameter() - curve.FirstParameter())
+    return [(np.array(c), np.array(a), r) for (c, a, r), span in spans.items()
+            if span > 2 * np.pi - 0.05]

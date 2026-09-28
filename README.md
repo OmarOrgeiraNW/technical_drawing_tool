@@ -36,17 +36,23 @@ pytest
 ## What v1 draws
 
 - Front, top and left views in ISO first-angle arrangement (ISO 5456-2) plus an
-  isometric view. The front view faces the largest flat face; override with
-  `views.front` / `views.up` / `views.iso` in the YAML.
+  isometric view. The largest flat face becomes the base when it covers a good
+  part of the footprint (a flange); the front view is the most detailed of the
+  side views (ISO 128-3). A side view that repeats the front view (turned
+  parts) is left out. Override with `views.front` / `views.up` / `views.iso`.
 - Visible edges and silhouettes only (tangent edges and hidden lines omitted).
-- Centre lines where a view is mirror-symmetric.
-- Overall envelope dimensions (one Ø instead of width + height when the front
-  view outline is a circle), ISO 129-1 style.
+- Centre lines where a view is mirror-symmetric, centre marks on every visible
+  full circle, axis lines on visible cylinders seen from the side.
+- Overall envelope dimensions, each size once (one Ø on a round view), shown as
+  reference dimensions `( )` unless `reference_envelope: false`.
 - Automatic sheet and scale: A4 if the part fits at 1:1 or larger, otherwise
   the largest ISO 5455 scale on A3. Override with `sheet` / `scale`.
-- ISO 5457 frame, ISO 7200 title block with general tolerance
-  (ISO 2768-mK default), default surface texture, scale and projection symbol,
-  and a numbered notes block.
+- ISO 5457 frame with grid reference zones, ISO 7200 title block with mass
+  (volume x density; density from `density` or the material name), general
+  tolerance (ISO 2768-mK default), default surface texture, scale and
+  projection symbol.
+- Notes: "Dimensions in mm", the ISO 13715 edge condition (`edges`, default
+  external -0.3 / internal +0.3), then the part's own notes.
 
 DXF layers: `VISIBLE`, `HIDDEN`, `CENTER`, `DIMS`, `TEXT`, `FRAME`. The DXF is
 drawn at sheet size in mm (views scaled); dimensions carry DIMLFAC so they read

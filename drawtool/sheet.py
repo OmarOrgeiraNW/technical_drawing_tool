@@ -6,7 +6,6 @@ rendered from the same DXF, so all three outputs always agree.
 """
 
 import itertools
-import textwrap
 from pathlib import Path
 
 import ezdxf
@@ -18,7 +17,7 @@ from ezdxf.enums import TextEntityAlignment
 from ezdxf.fonts import fonts
 from ezdxf.math import BoundingBox2d
 
-from . import geometry
+from . import geometry, partfile
 
 fonts.font_manager.scan_folder(Path(__file__).parent / "fonts")  # same font on every OS
 
@@ -74,7 +73,7 @@ def place(ext, sheet, s, notes_h):
     inner = (area[0] + PAD, area[1] + PAD, area[2] - PAD, area[3] - PAD)
     tb = (area[2] - TB_W, area[1], area[2], area[1] + TB_H + notes_h)
     fw, fh = (v * s for v in _size(ext["front"]))
-    lw = _size(ext["left"])[0] * s
+    lw = _size(ext["left"])[0] * s if "left" in ext else -GAP
     th = _size(ext["top"])[1] * s
     group_w, group_h = DIM_SPACE + fw + GAP + lw, DIM_SPACE + fh + GAP + th
     free_w = inner[2] - inner[0]
@@ -83,12 +82,13 @@ def place(ext, sheet, s, notes_h):
         rects = {
             "front": (fx, ftop - fh, fx + fw, ftop),
             "top": (fx, ftop - fh - GAP - th, fx + fw, ftop - fh - GAP),
-            "left": (fx + fw + GAP, ftop - fh, fx + fw + GAP + lw, ftop),
         }
         # keep-out zones = views plus the dimension space above/left of them
         zones = [(rects["front"][0] - DIM_SPACE, *rects["front"][1:3], rects["front"][3] + DIM_SPACE),
-                 (rects["top"][0] - DIM_SPACE, *rects["top"][1:]),
-                 rects["left"]]
+                 (rects["top"][0] - DIM_SPACE, *rects["top"][1:])]
+        if "left" in ext:
+            rects["left"] = (fx + fw + GAP, ftop - fh, fx + fw + GAP + lw, ftop)
+            zones.append((*rects["left"][:3], rects["left"][3] + DIM_SPACE))
         if all(_inside(z, inner) and not _overlap(z, tb, PAD) for z in zones):
             origins = {}
             for name, r in rects.items():
@@ -184,6 +184,28 @@ def draw_frame(msp, lay):
     for a, b in (((0, h / 2), (x0, h / 2)), ((x1, h / 2), (w, h / 2)),  # ISO 5457 centring marks
                  ((w / 2, 0), (w / 2, y0)), ((w / 2, y1), (w / 2, h))):
         msp.add_line(a, b, dxfattribs={"layer": "FRAME", "lineweight": 70})
+    # ISO 5457 grid reference: 50 mm fields counted from the centring marks,
+    # numbers left to right along the top and bottom, letters top to bottom at the sides
+    xs = _fields(w / 2, x0, x1)
+    ys = _fields(h / 2, y0, y1)[::-1]
+    for x in xs[1:-1]:
+        for ya, yb in ((y1, y1 + 5), (y0, y0 - 5)):
+            msp.add_line((x, ya), (x, yb), dxfattribs={"layer": "FRAME"})
+    for y in ys[1:-1]:
+        for xa, xb in ((x0, x0 - 5), (x1, x1 + 5)):
+            msp.add_line((xa, y), (xb, y), dxfattribs={"layer": "FRAME"})
+    for i, (a, b) in enumerate(zip(xs[:-1], xs[1:]), 1):
+        for y in (y1 + 5, y0 - 5):
+            text(msp, str(i), (a + b) / 2, y, align="MIDDLE_CENTER", layer="FRAME")
+    for letter, (a, b) in zip("ABCDEFGH", zip(ys[:-1], ys[1:])):
+        for x in (x0 - 5, x1 + 5):
+            text(msp, letter, x, (a + b) / 2, align="MIDDLE_CENTER", layer="FRAME")
+
+
+def _fields(centre, lo, hi, size=50):
+    """Field boundaries every `size` mm from the centring mark, clipped to the frame."""
+    inner = [centre + k * size for k in range(-10, 11) if lo < centre + k * size < hi]
+    return [lo, *inner, hi]
 
 
 def to_paper(pts, origin, s):
@@ -205,6 +227,63 @@ def draw_centre_lines(msp, ext, origin, s, sym, overhang=3):
     if sym[1]:
         cy = (y0 + y1) / 2
         msp.add_line((x0 - overhang, cy), (x1 + overhang, cy), dxfattribs=attribs)
+
+
+def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2):
+    """Centre crosses on visible full circles and axis lines on visible cylinders.
+
+    Hidden features get none (hidden lines are not drawn). Arms that would lie
+    on the view's symmetry lines are left out; tiny circles get continuous lines.
+    """
+    d, y = frame
+    x = np.cross(y, d)
+    raster = geometry.Raster(lines)
+    tol = 1e-3 * max(_size(ext))
+    sym_x = (ext[0] + ext[2]) / 2 if sym[0] else None
+    sym_y = (ext[1] + ext[3]) / 2 if sym[1] else None
+    marks, axes = {}, {}
+    ring = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    for c, a, r in circles:
+        p = np.array([c @ x, c @ y])
+        if abs(a @ d) > 0.999:  # seen as a circle
+            if raster.coverage(p + r * np.c_[np.cos(ring), np.sin(ring)]) >= 0.7:
+                key = tuple(np.round(p, 2))
+                marks[key] = max(marks.get(key, 0), r)
+        elif abs(a @ d) < 1e-3:  # seen from the side: collect positions along the axis
+            foot = c - (c @ a) * a
+            key = (tuple(np.round(a, 4)), tuple(np.round(foot, 2)))
+            axes.setdefault(key, []).append((c @ a, r, c))
+    for (px, py), r in marks.items():
+        small = 2 * r * s < 3  # under 3 mm on paper: short continuous lines
+        arm = r * s + (overhang / 2 if small else overhang)
+        cx, cy = to_paper((px, py), origin, s)
+        attribs = {"layer": "CENTER", "ltscale": 0.25}
+        if small:
+            attribs["linetype"] = "Continuous"
+        if sym_x is None or abs(px - sym_x) > tol:
+            msp.add_line((cx, cy - arm), (cx, cy + arm), dxfattribs=attribs)
+        if sym_y is None or abs(py - sym_y) > tol:
+            msp.add_line((cx - arm, cy), (cx + arm, cy), dxfattribs=attribs)
+    for (a, _), stations in axes.items():
+        ts = [t for t, _, _ in stations]
+        if max(ts) - min(ts) < tol:
+            continue
+        r = max(r for _, r, _ in stations)
+        c0 = stations[0][2] - stations[0][0] * np.asarray(a)
+        a2 = np.array([np.dot(a, x), np.dot(a, y)])
+        n2 = np.array([-a2[1], a2[0]])
+        base = np.array([c0 @ x, c0 @ y])
+        t = np.linspace(min(ts), max(ts), 24)[:, None]
+        sides = np.vstack([base + t * a2 + r * n2, base + t * a2 - r * n2])
+        if raster.coverage(sides) < 0.6:
+            continue  # hidden cylinder
+        on_sym = ((sym_x is not None and abs(a2[0]) < 1e-6 and abs(base[0] - sym_x) < tol) or
+                  (sym_y is not None and abs(a2[1]) < 1e-6 and abs(base[1] - sym_y) < tol))
+        if on_sym:
+            continue
+        p1 = to_paper(base + min(ts) * a2, origin, s) - a2 * overhang
+        p2 = to_paper(base + max(ts) * a2, origin, s) + a2 * overhang
+        msp.add_line(tuple(p1), tuple(p2), dxfattribs={"layer": "CENTER", "ltscale": 0.25})
 
 
 def _extreme_point(polylines, axis, low, pick_high):
@@ -234,8 +313,10 @@ def dim_vertical_left(msp, polylines, ext, origin, s, prefix=""):
 
 
 def _dim(msp, base, p1, p2, angle, s, prefix=""):
+    """`prefix` wraps the measured value: "%%c" for Ø, "(" for a reference dimension."""
+    label = prefix + "<>" + (")" if prefix.startswith("(") else "")
     dim = msp.add_linear_dim(base=base, p1=tuple(p1), p2=tuple(p2), angle=angle, dimstyle="ISO",
-                             text=prefix + "<>", override={"dimlfac": 1 / s},
+                             text=label, override={"dimlfac": 1 / s},
                              dxfattribs={"layer": "DIMS"})
     dim.render()
     return dim.dimension
@@ -263,7 +344,7 @@ def texture_symbol(msp, x, y, h1=2.5):
                        dxfattribs={"layer": "TEXT"})
 
 
-def title_block(msp, lay, tb):
+def title_block(msp, lay, tb, mass=""):
     x0, y0 = lay["area"][2] - TB_W, lay["area"][1]
 
     def cell(c0, r0, c1, r1, label, value, h=H):
@@ -276,13 +357,14 @@ def title_block(msp, lay, tb):
         return r
 
     t = tb["title_block"]
-    cell(0, 4, 60, 5, "Material", t["material"])
-    cell(60, 4, 100, 5, "General tolerances", tb["general_tolerance"])
-    r = cell(100, 4, 135, 5, "Surface texture", "")
+    cell(0, 4, 50, 5, "Material", t["material"])
+    cell(50, 4, 72, 5, "Mass", mass)
+    cell(72, 4, 107, 5, "General tolerances", tb["general_tolerance"])
+    r = cell(107, 4, 137, 5, "Surface texture", "")
     if tb["default_finish"]:
         texture_symbol(msp, r[0] + 3, r[1] + 1.2)
         text(msp, tb["default_finish"], r[0] + 7.5, r[1] + 1.6, align="LEFT", width=r[2] - r[0] - 9)
-    cell(135, 4, 155, 5, "Scale", fmt_scale(lay["scale"]))
+    cell(137, 4, 155, 5, "Scale", fmt_scale(lay["scale"]))
     r = cell(155, 4, 180, 5, "", "")
     projection_symbol(msp, (r[0] + r[2]) / 2, (r[1] + r[3]) / 2)
     cell(0, 3, 35, 4, "Responsible dept.", t["department"])
@@ -303,9 +385,25 @@ def title_block(msp, lay, tb):
 def note_lines(notes):
     lines = []
     for i, n in enumerate(notes, 1):
-        wrapped = textwrap.wrap(str(n), 80) or [""]
-        lines += [f"{i}. {wrapped[0]}"] + [f"    {w}" for w in wrapped[1:]]
+        words, line = str(n).split(), f"{i}."
+        for word in words:
+            if text_width(f"{line} {word}", H) > TB_W:
+                lines.append(line)
+                line = "    "
+            line = f"{line} {word}" if line.strip() else f"{line}{word}"
+        lines.append(line)
     return lines
+
+
+def general_notes(cfg):
+    """Standard notes that precede the part's own notes."""
+    notes = ["Dimensions in mm." + (" Dimensions in ( ) are for reference only."
+                                    if cfg["reference_envelope"] else "")]
+    edges = cfg.get("edges") or {}
+    parts = [f"{side} {edges[side]}" for side in ("external", "internal") if edges.get(side)]
+    if parts:
+        notes.append("Undefined edges ISO 13715: " + ", ".join(parts) + ".")
+    return notes
 
 
 NOTE_PITCH = 1.7 * H
@@ -351,33 +449,44 @@ def build(shape, cfg):
         front = g_front if front == "auto" else front
         up = g_up if up == "auto" else up
     frames = geometry.view_frames(front, up, None if views["iso"] == "auto" else views["iso"])
-    geometry.mesh(shape, max(env["size"]) / 5000)
+    geometry.prepare(shape)
     lines = {name: geometry.project(shape, d, y) for name, (d, y) in frames.items()}
     ext = view_extents(env, {k: v for k, v in frames.items() if k != "iso"})
     ext["iso"] = geometry.extents(lines["iso"])
+    ortho = ["front", "top", "left"]
+    if geometry.same_view(lines["left"], lines["front"], ext["left"], ext["front"]):
+        ortho.remove("left")  # e.g. a turned part: the side view repeats the front view
+        del ext["left"]
 
-    notes = cfg["notes"] or []
+    notes = general_notes(cfg) + list(cfg["notes"] or [])
     lay = choose_layout(ext, notes_height(notes), cfg["sheet"], cfg["scale"])
     s = lay["scale"]
     doc = new_doc()
     msp = doc.modelspace()
     draw_frame(msp, lay)
 
-    info = {"sheet": lay["sheet"], "scale": s, "front": front, "up": up, "dims": [],
-            "view_rects": dict(lay["rects"])}
-    for name in ("front", "top", "left"):
+    info = {"sheet": lay["sheet"], "scale": s, "front": front, "up": up, "views": ortho,
+            "dims": [], "view_rects": dict(lay["rects"])}
+    circles = geometry.circles(shape)
+    for name in ortho:
         o = np.array(lay["origins"][name])
+        sym = geometry.symmetry(lines[name])
         draw_view(msp, lines[name], o, s)
-        draw_centre_lines(msp, ext[name], o, s, geometry.symmetry(lines[name]))
-    # overall envelope: width + height on the front view (one Ø if it is round), depth on the top view
-    round_front = geometry.is_round(lines["front"], ext["front"])
-    dims = [("front", dim_horizontal_above, "%%c" if round_front else "")]
-    if not round_front:
-        dims.append(("front", dim_vertical_left, ""))
-    dims.append(("top", dim_vertical_left, ""))
-    for view, fn, prefix in dims:
-        dim = fn(msp, lines[view], ext[view], np.array(lay["origins"][view]), s, prefix)
-        info["dims"].append((view, prefix.replace("%%c", "Ø") + str(round(dim.get_measurement() / s, 4))))
+        draw_centre_lines(msp, ext[name], o, s, sym)
+        centre_marks(msp, circles, frames[name], lines[name], ext[name], o, s, sym)
+
+    # overall envelope: width, height, depth once each; one Ø on a round view instead of two sizes
+    round_view = next((v for v in ortho if geometry.is_round(lines[v], ext[v])), None)
+    plan = {"front": [("front", dim_horizontal_above, "%%c"), ("top", dim_vertical_left, "")],
+            "top": [("front", dim_vertical_left, ""), ("top", dim_vertical_left, "%%c")],
+            "left": [("front", dim_horizontal_above, ""), ("left", dim_horizontal_above, "%%c")],
+            None: [("front", dim_horizontal_above, ""), ("front", dim_vertical_left, ""),
+                   ("top", dim_vertical_left, "")]}[round_view]
+    ref = "(" if cfg["reference_envelope"] else ""
+    for view, fn, prefix in plan:
+        dim = fn(msp, lines[view], ext[view], np.array(lay["origins"][view]), s, ref + prefix)
+        value = prefix.replace("%%c", "Ø") + str(round(dim.get_measurement() / s, 4))
+        info["dims"].append((view, f"({value})" if ref else value))
 
     iso_w, iso_h = _size(ext["iso"])
     r, fit = free_rect(lay, (iso_w, iso_h))
@@ -392,17 +501,30 @@ def build(shape, cfg):
             text(msp, f"ISOMETRIC  {fmt_scale(iso_scale)}", cx, info["view_rects"]["iso"][1] - 2,
                  align="TOP_CENTER")
 
-    title_block(msp, lay, cfg)
+    grams = mass_grams(shape, cfg)
+    info["mass_g"] = grams
+    title_block(msp, lay, cfg, fmt_mass(grams))
     draw_notes(msp, lay, notes)
     info["problems"] = check(doc, info, lay)
     return doc, info
+
+
+def mass_grams(shape, cfg):
+    density = partfile.density(cfg)  # g/cm3
+    return geometry.volume(shape) * density / 1000 if density else None
+
+
+def fmt_mass(grams):
+    if grams is None:
+        return ""
+    return f"{grams:.1f} g" if grams < 1000 else f"{grams / 1000:.2f} kg"
 
 
 def check(doc, info, lay):
     """Overlapping text, text on geometry, anything outside the frame."""
     boxes = []
     for e in doc.modelspace():
-        if e.dxftype() == "TEXT":
+        if e.dxftype() == "TEXT" and e.dxf.layer != "FRAME":  # grid labels sit in the margin
             boxes.append((e.dxf.text, ezdxf.bbox.extents([e])))
         elif e.dxftype() == "DIMENSION":
             for v in e.virtual_entities():

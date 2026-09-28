@@ -15,6 +15,7 @@ def analyze(step, out):
         "source": Path(step).name,
         "units": "mm",
         "envelope": geometry.envelope(shape),
+        "volume_mm3": round(geometry.volume(shape), 1),
         "planar_faces": geometry.planar_faces(shape),
         "views": {"front": front, "up": up},
     }
@@ -40,7 +41,8 @@ def draw(step, yaml_path, out):
     doc.saveas(out / f"{stem}.dxf")
     (out / f"{stem}.pdf").write_bytes(sheet.render(doc, info["sheet"], "pdf"))
     (out / f"{stem}.png").write_bytes(sheet.render(doc, info["sheet"], "png"))
-    print(f"wrote {stem}.dxf/.pdf/.png to {out}  ({info['sheet']}, scale {sheet.fmt_scale(info['scale'])})")
+    print(f"wrote {stem}.dxf/.pdf/.png to {out}  ({info['sheet']}, scale {sheet.fmt_scale(info['scale'])}, "
+          f"front {info['front']}, up {info['up']})")
     for p in info["problems"]:
         print(f"layout problem: {p}", file=sys.stderr)
 

@@ -157,6 +157,13 @@ class App:
             field(key, label)
         field("general_tolerance", "General tolerances")
         field("default_finish", "Surface texture")
+        field("density", "Density g/cm3 (blank = auto)")
+        field("edge_external", "Edges ISO 13715 external")
+        field("edge_internal", "Edges ISO 13715 internal")
+        self.reference = tk.BooleanVar()
+        ttk.Checkbutton(form, text="Overall dimensions as (reference)", variable=self.reference).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=2)
+        row += 1
         heading("Notes (one per line)")
         self.notes = tk.Text(form, width=40, height=6, wrap="word")
         self.notes.grid(row=row, column=0, columnspan=2, sticky="we")
@@ -165,11 +172,14 @@ class App:
     def fill_form(self):
         c = self.cfg
         values = {key: c["title_block"][key] for key, _ in TITLE_FIELDS}
+        edges = c["edges"] or {}
         values.update(front=c["views"]["front"], up=c["views"]["up"], sheet=c["sheet"],
                       scale=c["scale"], general_tolerance=c["general_tolerance"],
-                      default_finish=c["default_finish"])
+                      default_finish=c["default_finish"], density=c["density"],
+                      edge_external=edges.get("external"), edge_internal=edges.get("internal"))
         for key, var in self.vars.items():
             var.set(str(values.get(key, "") or ""))
+        self.reference.set(bool(c["reference_envelope"]))
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", "\n".join(str(n) for n in c["notes"] or []))
 
@@ -179,6 +189,9 @@ class App:
         c["views"].update(front=v["front"] or "auto", up=v["up"] or "auto", confirm=False)
         c["sheet"], c["scale"] = v["sheet"] or "auto", v["scale"] or "auto"
         c["general_tolerance"], c["default_finish"] = v["general_tolerance"], v["default_finish"]
+        c["density"] = v["density"] or None
+        c["edges"] = {"external": v["edge_external"], "internal": v["edge_internal"]}
+        c["reference_envelope"] = self.reference.get()
         for key, _ in TITLE_FIELDS:
             c["title_block"][key] = v[key]
         c["notes"] = [n.strip() for n in self.notes.get("1.0", "end").splitlines() if n.strip()]
