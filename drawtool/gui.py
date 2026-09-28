@@ -300,6 +300,8 @@ class App:
         self.fill_holes(i["hole_types"])
         msg = (f"{i['sheet']}, scale {sheet.fmt_scale(i['scale'])}, front view {i['front']}, "
                f"up {i['up']}, {len(i['holes'])} holes")
+        if i["extra_views"]:
+            msg += ", extra views " + ", ".join(i["extra_views"])
         pending = sum(1 for t in i["hole_types"] if t["spec"].get("confirm"))
         if pending:
             msg += f"   |   {pending} hole type(s) to confirm in the Holes tab"

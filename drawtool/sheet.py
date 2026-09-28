@@ -101,14 +101,16 @@ def place(ext, sheet, s, notes_h):
                 e = ext[name]
                 origins[name] = (r[0] - e[0] * s, r[1] - e[1] * s)
             return {"sheet": sheet, "size": (w, h), "scale": s, "area": area,
-                    "title_block": tb, "rects": rects, "zones": zones, "origins": origins}
+                    "title_block": tb, "rects": rects, "zones": zones, "origins": origins,
+                    "aux": {}, "letters": iter(DETAIL_LETTERS)}
     return None
 
 
-def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None):
+def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=()):
     """A4 if the part fits at 1:1 or larger, otherwise the best scale on A3.
 
-    `block` is the size of the hole tables, which must fit next to the views.
+    `block` is the size of the hole tables and `needs` the extra views for
+    holes; both must fit next to the main views.
     """
     if sheet != "auto" and sheet not in SHEETS:
         raise ValueError(f"unknown sheet size '{sheet}': use auto, A4 or A3")
@@ -117,7 +119,7 @@ def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None):
     for i, name in enumerate(sheets):
         for s in scales:
             lay = place(ext, name, s, notes_h)
-            if lay is None or (block and not _reserve(lay, block)):
+            if lay is None or (block and not _reserve(lay, block)) or not _reserve_aux(lay, needs):
                 continue
             if s >= 1 or i == len(sheets) - 1 or scale != "auto":
                 return lay
@@ -133,6 +135,35 @@ def _reserve(lay, block):
     x1, y1 = r[2] - PAD, r[3] - PAD
     lay["table"] = (x1 - block[0], y1 - block[1], x1, y1)
     lay["zones"].append(lay["table"])
+    return True
+
+
+def _reserve_aux(lay, needs):
+    """Room for each extra view: the largest ISO scale (up to the one that puts its
+    holes 10 mm apart) that fits the free space, down to a fifth of the sheet scale."""
+    s = lay["scale"]
+
+    def wanted(need):
+        return next((c for c in sorted(SCALES) if c >= s and need["gap"] * c >= 10), max(SCALES))
+
+    for need in sorted(needs, key=lambda n: -max(n["size"]) * wanted(n)):  # biggest first
+        top = wanted(need)
+        for c in (c for c in sorted(SCALES, reverse=True) if s / 5 <= c <= top):
+            w, h = need["size"][0] * c + 2, need["size"][1] * c + 2
+            free, fit = free_rect(lay, (w, h + 10), label=0)
+            if not free or fit < 1:
+                continue
+            x0, y1 = free[0] + PAD, free[3] - PAD  # top-left corner keeps the rest in one piece
+            box = (x0, y1 - h - 10, x0 + w, y1)  # view plus its label
+            cx, cy = x0 + w / 2, y1 - 10 - h / 2
+            lay["zones"].append(box)
+            lay["aux"][need["view"]] = {"letter": need["letter"], "scale": c, "partial": need["partial"],
+                                        "paper": np.array([cx, cy]),
+                                        "origin": np.array([cx, cy]) - need["centre"] * c}
+            break
+        else:
+            return False
+    lay["letters"] = iter(DETAIL_LETTERS[len(needs):])
     return True
 
 
@@ -306,33 +337,50 @@ def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2, pi
         msp.add_line(tuple(p1), tuple(p2), dxfattribs={"layer": "CENTER", "ltscale": 0.25})
 
 
-def plan_holes(found, frames, ortho, ext, sym, cfg):
-    """Give every hole a view (where it is seen as a circle), a type letter and a tag.
+AUX_VIEWS = ("left", "bottom", "right", "rear")  # used only for holes no main view shows
 
-    Returns rows (one per hole), types (one per hole type, with the spec in
-    use) and warnings (unconfirmed guesses, holes that fit no view).
+
+def view_place(lay, view):
+    """(origin, scale) mapping a view's coordinates to paper: paper = xy * scale + origin."""
+    if view in lay["aux"]:
+        return lay["aux"][view]["origin"], lay["aux"][view]["scale"]
+    return np.array(lay["origins"][view]), lay["scale"]
+
+
+def _type_entry(h):
+    """The entry that names a hole type: the counterbored or countersunk end if any."""
+    return next((e for e in h["entries"] if e["cbore"] or e["csk"]), h["entries"][0])
+
+
+def plan_holes(found, frames, ortho, cfg):
+    """Give every hole a view in which its opening is directly visible, a type and a tag.
+
+    Equal holes stay together in the first view that shows all of them; views
+    from below, the right or the rear are only used for holes the main views
+    do not show. Holes are never marked in a view where they are hidden.
     """
-    rows, warnings = [], []
+    views = list(ortho) + [v for v in AUX_VIEWS if v not in ortho]
+
+    def seen(h, view):
+        d = frames[view][0]
+        return next((e for e in h["entries"] if np.dot(e["out"], d) > 0.999 and e["exposed"]), None)
+
+    groups = defaultdict(list)
     for h in found:
-        best = None
-        for rank, view in enumerate(ortho):
-            d, y = frames[view]
-            if abs(np.dot(h["axis"], d)) < 0.999:
+        groups[holes.type_key(h, _type_entry(h))].append(h)
+    rows, warnings = [], []
+    for key, members in groups.items():
+        together = next((v for v in views if all(seen(h, v) for h in members)), None)
+        for h in members:
+            view = together or next((v for v in views if seen(h, v)), None)
+            if view is None:
+                warnings.append(f"{key} hole at {np.round(_type_entry(h)['point'], 2).tolist()} is not "
+                                "visible square-on from any side and is left out of the hole table")
                 continue
-            facing = [e for e in h["entries"] if np.dot(e["out"], d) > 0.999]
-            shown = next((e for e in facing if e["exposed"]), None)
-            option = (shown is None, rank, view, shown or (facing or h["entries"])[0])
-            if best is None or option[:2] < best[:2]:
-                best = option
-        if best is None:
-            warnings.append(f"Ø{holes.fmt(h['diameter'])} hole at {np.round(h['entries'][0]['point'], 2).tolist()}"
-                            " is not square to any view and is left out of the hole table")
-            continue
-        hidden, _, view, entry = best
-        d, y = frames[view]
-        p = entry["point"]
-        rows.append({"hole": h, "entry": entry, "view": view, "hidden": hidden,
-                     "xy": np.array([p @ np.cross(y, d), p @ y]), "key": holes.type_key(h, entry)})
+            d, y = frames[view]
+            p = seen(h, view)["point"]
+            rows.append({"hole": h, "entry": _type_entry(h), "view": view, "key": key, "point": p,
+                         "xy": np.array([p @ np.cross(y, d), p @ y])})
     first = {}
     for r in rows:
         first.setdefault(r["key"], r)
@@ -345,7 +393,7 @@ def plan_holes(found, frames, ortho, ext, sym, cfg):
             spec = {"thread": "", "thread_depth": None, "tolerance": "", "finish": "", "confirm": False,
                     "note": spec["note"], **(user[key] or {})}
         mine = sorted((r for r in rows if r["key"] == key),
-                      key=lambda r: (ortho.index(r["view"]), -round(r["xy"][1], 2), round(r["xy"][0], 2)))
+                      key=lambda r: (views.index(r["view"]), -round(r["xy"][1], 2), round(r["xy"][0], 2)))
         for i, r in enumerate(mine, 1):
             r["tag"] = f"{letter}{i}"
         h = first[key]["hole"]
@@ -354,6 +402,29 @@ def plan_holes(found, frames, ortho, ext, sym, cfg):
         if holes.pending(spec):
             warnings.append(f"hole type {letter} ({key}): '{holes.pending(spec)}' not confirmed")
     return rows, types, warnings
+
+
+def aux_needs(rows, ortho, ext):
+    """Extra views the holes need: the whole view, or a partial circle for a small area."""
+    needs = []
+    for view in AUX_VIEWS:
+        mine = [r for r in rows if r["view"] == view]
+        if view in ortho or not mine:
+            continue
+        pts = np.array([r["xy"] for r in mine])
+        rmax = max(r["hole"]["diameter"] for r in mine) / 2
+        lo, hi = pts.min(axis=0) - rmax, pts.max(axis=0) + rmax
+        e = ext[view]
+        gap = min((np.hypot(*(a - b)) for a, b in itertools.combinations(pts, 2)), default=np.inf)
+        need = {"view": view, "letter": DETAIL_LETTERS[len(needs)], "gap": max(gap, 1e-3)}
+        if hi[0] - lo[0] > 0.5 * _size(e)[0] or hi[1] - lo[1] > 0.5 * _size(e)[1]:
+            need.update(partial=None, size=_size(e), centre=np.array([(e[0] + e[2]) / 2, (e[1] + e[3]) / 2]))
+        else:
+            centre = (lo + hi) / 2
+            R = max(np.hypot(*(p - centre)) for p in pts) * 1.3 + rmax + 1.5
+            need.update(partial=(centre, R), size=(2 * R, 2 * R), centre=centre)
+        needs.append(need)
+    return needs
 
 
 def _letters():
@@ -380,32 +451,32 @@ def hole_origin(view, frame, ext, sym, datum):
     return np.array([(x0 + x1) / 2 if sym[0] else x0, (y0 + y1) / 2 if sym[1] else y0])
 
 
-def hole_tables(rows, types, ortho, origins, at_centre):
-    """[(title, note, [(tag, X, Y, SIZE, REMARK)])] per view; SIZE on the first row of each type."""
-    specs = {t["key"]: t["spec"] for t in types}
-    tables = []
-    for view in ortho:
-        mine = sorted((r for r in rows if r["view"] == view), key=lambda r: (r["tag"][0], int(r["tag"][1:])))
+def hole_origins(rows, views, frames, ext, sym, datum, needs):
+    """Origin, origin-at-centre-lines flag and table note for each view with holes."""
+    titles = {n["view"]: f"view {n['letter']}" for n in needs}
+    partial = {n["view"]: n["partial"] for n in needs if n["partial"]}
+    origins, at_centre, notes = {}, {}, {}
+    for v in views:
+        mine = [r for r in rows if r["view"] == v]
         if not mine:
             continue
-        lines = []
-        for key in dict.fromkeys(r["key"] for r in mine):  # types in tag order
-            group = [r for r in mine if r["key"] == key]
-            first = group[0]
-            size = _wrap(holes.size_text(first["hole"], first["entry"], specs[key]), SIZE_W)
-            for i, r in enumerate(group):
-                x, y = (v if abs(v) >= 0.005 else 0.0 for v in r["xy"] - origins[view])
-                lines.append((r["tag"], f"{x:.2f}", f"{y:.2f}", size[i] if i < len(size) else "",
-                              "hidden" if r["hidden"] else ""))
-            lines += [("", "", "", more, "") for more in size[len(group):]]
-        note = (f"X/Y from the centre lines of the {view} view" if at_centre[view]
-                else f"X/Y from the origin marked in the {view} view")
-        tables.append((f"HOLE TABLE - {view.upper()} VIEW", note, lines))
-    return tables
+        o = hole_origin(v, frames[v], ext[v], sym[v], datum)
+        title = titles.get(v, f"{v} view")
+        centre = np.array([(ext[v][0] + ext[v][2]) / 2, (ext[v][1] + ext[v][3]) / 2])
+        if v in partial and np.hypot(*(o - partial[v][0])) > 0.9 * partial[v][1]:
+            first = min(mine, key=lambda r: (r["tag"][0], int(r["tag"][1:])))
+            o, at_centre[v] = first["xy"], False  # the usual origin is outside the partial view
+            notes[v] = f"X/Y from the centre of hole {first['tag']} in {title}"
+        else:
+            at_centre[v] = bool(sym[v][0] and sym[v][1] and np.allclose(o, centre, atol=1e-6))
+            where = title if v in titles else f"the {title}"
+            notes[v] = f"X/Y from the {'centre lines' if at_centre[v] else 'origin marked'} in {where}"
+        origins[v] = o
+    return origins, at_centre, notes
 
 
-HEADER = ("TAG", "X", "Y", "SIZE", "REMARK")
-SIZE_W = 62  # mm; longer hole descriptions continue on the type's next rows
+HEADER = ("TAG", "X", "Y", "SIZE")
+SIZE_W = 62  # mm; longer hole descriptions wrap inside their cell
 
 
 def _wrap(description, width):
@@ -421,44 +492,128 @@ def _wrap(description, width):
     return lines
 
 
+def hole_tables(rows, types, views, origins, notes, titles):
+    """[(title, note, [(size lines, [(tag, X, Y)])])] per view: equal holes grouped under one size."""
+    specs = {t["key"]: t["spec"] for t in types}
+    tables = []
+    for view in views:
+        mine = sorted((r for r in rows if r["view"] == view), key=lambda r: (r["tag"][0], int(r["tag"][1:])))
+        if not mine:
+            continue
+        groups = []
+        for key in dict.fromkeys(r["key"] for r in mine):  # types in tag order
+            group = [r for r in mine if r["key"] == key]
+            size = holes.size_text(group[0]["hole"], group[0]["entry"], specs[key])
+            lines = _wrap(f"{len(group)}× {size}" if len(group) > 1 else size, SIZE_W)
+            cells = []
+            for r in group:
+                x, y = (v if abs(v) >= 0.005 else 0.0 for v in r["xy"] - origins[view])
+                cells.append((r["tag"], f"{x:.2f}", f"{y:.2f}"))
+            groups.append((lines, cells))
+        tables.append((f"HOLE TABLE - {titles[view]}", notes[view], groups))
+    return tables
+
+
 def table_size(tables):
-    cells = [c for _, _, lines in tables for c in lines] + [HEADER]
-    widths = [max(text_width(c[k], TAG_H) for c in cells) + 3 for k in range(5)]
+    cells = [c for _, _, groups in tables for _, rows in groups for c in rows] + [HEADER[:3]]
+    lines = [t for _, _, groups in tables for ls, _ in groups for t in ls] + [HEADER[3]]
+    widths = [max(text_width(c[k], TAG_H) for c in cells) + 3 for k in range(3)]
+    widths += [max(text_width(t, TAG_H) for t in lines) + 3]
     widths[1] = widths[2] = max(widths[1], widths[2], text_width("-00.00", TAG_H) + 3)
     title_w = max(max(text_width(t, TAG_H + 0.5), text_width(n, TAG_H)) for t, n, _ in tables) + 3
     widths[3] += max(0, title_w - sum(widths))
-    height = sum(ROW * (len(lines) + 3) for _, _, lines in tables) + PAD * (len(tables) - 1)
-    return widths, (sum(widths), height)
+    height = sum(ROW * (3 + sum(max(len(r), len(ls)) for ls, r in groups)) for _, _, groups in tables)
+    return widths, (sum(widths), height + PAD * (len(tables) - 1))
 
 
 def draw_tables(msp, box, tables, widths):
+    """Hole tables; the SIZE cell of a group of equal holes spans all its rows."""
     x0, top = box[0], box[3]
     xs = np.cumsum([x0] + widths)
-    for title, note, lines in tables:
-        bottom = top - ROW * (len(lines) + 2)
+    for title, note, groups in tables:
+        bottom = top - ROW * (2 + sum(max(len(r), len(ls)) for ls, r in groups))
         rect(msp, (x0, bottom, xs[-1], top), lw=50)
         text(msp, title, x0 + 1.5, top - ROW + 1.3, h=TAG_H + 0.5, align="LEFT")
-        for i, row in enumerate([HEADER] + lines):
-            y = top - ROW * (i + 2)
-            msp.add_line((x0, y + ROW), (xs[-1], y + ROW), dxfattribs={"layer": "FRAME"})
-            for k, value in enumerate(row):
-                right = k in (1, 2) and i > 0  # numbers right-aligned
-                text(msp, value, xs[k + 1] - 1.5 if right else xs[k] + 1.5, y + 1.5, h=TAG_H,
-                     align="RIGHT" if right else "LEFT")
+        y = top - ROW
+        msp.add_line((x0, y), (xs[-1], y), dxfattribs={"layer": "FRAME"})
+        for k, label in enumerate(HEADER):
+            text(msp, label, xs[k] + 1.5, y - ROW + 1.5, h=TAG_H, align="LEFT")
+        y -= ROW
+        for lines, cells in groups:
+            height = ROW * max(len(cells), len(lines))
+            step = height / len(cells)
+            msp.add_line((x0, y), (xs[-1], y), dxfattribs={"layer": "FRAME", "lineweight": 50})
+            for i, (tag, xv, yv) in enumerate(cells):
+                if i:
+                    msp.add_line((x0, y - i * step), (xs[3], y - i * step), dxfattribs={"layer": "FRAME"})
+                base = y - (i + 1) * step + (step - TAG_H) / 2
+                text(msp, tag, xs[0] + 1.5, base, h=TAG_H, align="LEFT")
+                text(msp, xv, xs[2] - 1.5, base, h=TAG_H, align="RIGHT")
+                text(msp, yv, xs[3] - 1.5, base, h=TAG_H, align="RIGHT")
+            base = y - (height - len(lines) * ROW) / 2 - ROW + (ROW - TAG_H) / 2
+            for j, line in enumerate(lines):  # centred in the merged SIZE cell
+                text(msp, line, xs[3] + 1.5, base - j * ROW, h=TAG_H, align="LEFT")
+            y -= height
         for xv in xs[1:-1]:
             msp.add_line((xv, bottom), (xv, top - ROW), dxfattribs={"layer": "FRAME"})
         text(msp, note, x0, bottom - ROW + 1.5, h=TAG_H, align="LEFT")
         top = bottom - ROW - PAD
 
 
-def plan_details(rows, lay, ortho):
+def _centre_lines_in_circle(msp, ext, sym, centre, R, o, s):
+    """The view's symmetry lines, clipped to a circular (detail or partial) view."""
+    for k, on in enumerate(sym):
+        at = (ext[k] + ext[k + 2]) / 2
+        if on and abs(at - centre[k]) < R:
+            half = np.sqrt(R * R - (at - centre[k]) ** 2)
+            a, b = np.array(centre, float), np.array(centre, float)
+            a[k] = b[k] = at
+            a[1 - k] -= half
+            b[1 - k] += half
+            msp.add_line(tuple(to_paper(a, o, s)), tuple(to_paper(b, o, s)),
+                         dxfattribs={"layer": "CENTER", "ltscale": 0.5})
+
+
+def _circles_in(circles, frame, centre, R):
+    d, y = frame
+    x = np.cross(y, d)
+    return [(c, a, r) for c, a, r in circles if np.hypot(c @ x - centre[0], c @ y - centre[1]) + r < R]
+
+
+def draw_aux(msp, lay, lines, frames, ext, sym, circles):
+    """Extra views for holes (ISO 128-3 reference-arrow views): whole or partial, with letter."""
+    rects = {}
+    for view, a in lay["aux"].items():
+        o, c, e = a["origin"], a["scale"], ext[view]
+        if a["partial"]:
+            centre, R = a["partial"]
+            shown = geometry.clip_to_circle(lines[view], centre, R)
+            cx, cy = to_paper(centre, o, c)
+            msp.add_circle((cx, cy), R * c, dxfattribs={"layer": "DIMS"})
+            _centre_lines_in_circle(msp, e, sym[view], centre, R, o, c)
+            inside, pixels = _circles_in(circles, frames[view], centre, R), 150
+            rects[view] = (cx - R * c, cy - R * c, cx + R * c, cy + R * c)
+        else:
+            shown, inside, pixels = lines[view], circles, 600
+            draw_centre_lines(msp, e, o, c, sym[view])
+            rects[view] = (*to_paper(e[:2], o, c), *to_paper(e[2:], o, c))
+        draw_view(msp, shown, o, c)
+        if shown:
+            centre_marks(msp, inside, frames[view], shown, e, o, c, sym[view], pixels=pixels)
+        label = a["letter"] if c == lay["scale"] else f"{a['letter']} ({fmt_scale(c)})"
+        text(msp, label, a["paper"][0], rects[view][3] + 3, h=5, align="BOTTOM_CENTER")
+    return rects
+
+
+def plan_details(rows, lay, views):
     """Enlarged detail views (ISO 128-3) where hole centres crowd on paper.
 
     Scale: the smallest ISO 5455 scale that puts the closest holes 10 mm apart,
     stepping down until the detail fits the free space.
     """
-    s, details, letters = lay["scale"], [], iter(DETAIL_LETTERS)
-    for view in ortho:
+    details = []
+    for view in views:
+        s = view_place(lay, view)[1]
         spots = defaultdict(list)
         for r in rows:
             if r["view"] == view:
@@ -492,10 +647,10 @@ def plan_details(rows, lay, ortho):
                 free, fit = free_rect(lay, size, label=0)
                 if not free or fit < 1:
                     continue
-                cx, cy = (free[0] + free[2]) / 2, (free[1] + free[3]) / 2 - 4
+                cx, cy = free[0] + PAD + size[0] / 2, free[3] - PAD - 10 - R * sc  # top-left corner
                 box = (cx - size[0] / 2, cy - R * sc - 1, cx + size[0] / 2, cy + R * sc + 9)
                 lay["zones"].append(box)
-                detail = {"view": view, "letter": next(letters), "centre": centre, "R": R,
+                detail = {"view": view, "letter": next(lay["letters"]), "centre": centre, "R": R,
                           "scale": sc, "paper": np.array([cx, cy]), "box": box,
                           "origin": np.array([cx, cy]) - centre * sc}
                 details.append(detail)
@@ -507,37 +662,25 @@ def plan_details(rows, lay, ortho):
 
 
 def draw_details(msp, details, lines, frames, ext, sym, circles, lay):
-    """Circle and letter on the main view; the enlarged, clipped view with its label."""
-    s = lay["scale"]
+    """Circle and letter on the source view; the enlarged, clipped view with its label."""
     for d in details:
         view, c, R, sc, o = d["view"], d["centre"], d["R"], d["scale"], d["origin"]
-        mx, my = to_paper(c, np.array(lay["origins"][view]), s)
-        msp.add_circle((mx, my), R * s, dxfattribs={"layer": "DIMS"})
-        text(msp, d["letter"], mx + 0.71 * R * s + 1, my + 0.71 * R * s + 1, h=5, layer="HOLES")
+        vo, vs = view_place(lay, view)
+        mx, my = to_paper(c, vo, vs)
+        msp.add_circle((mx, my), R * vs, dxfattribs={"layer": "DIMS"})
+        text(msp, d["letter"], mx + 0.71 * R * vs + 1, my + 0.71 * R * vs + 1, h=5, layer="HOLES")
         clipped = geometry.clip_to_circle(lines[view], c, R)
         draw_view(msp, clipped, o, sc)
         msp.add_circle(tuple(d["paper"]), R * sc, dxfattribs={"layer": "DIMS"})
         text(msp, f"{d['letter']} ({fmt_scale(sc)})", d["paper"][0], d["paper"][1] + R * sc + 3, h=5,
              align="BOTTOM_CENTER")
-        e = ext[view]
-        for k, on in enumerate(sym[view]):  # symmetry lines crossing the detail
-            at = (e[k] + e[k + 2]) / 2
-            if on and abs(at - c[k]) < R:
-                half = np.sqrt(R * R - (at - c[k]) ** 2)
-                a, b = np.array(c, float), np.array(c, float)
-                a[k] = b[k] = at
-                a[1 - k] -= half
-                b[1 - k] += half
-                msp.add_line(tuple(to_paper(a, o, sc)), tuple(to_paper(b, o, sc)),
-                             dxfattribs={"layer": "CENTER", "ltscale": 0.5})
-        dv, y = frames[view]
-        x = np.cross(y, dv)
-        inside = [(cc, a, r) for cc, a, r in circles if np.hypot(cc @ x - c[0], cc @ y - c[1]) + r < R]
+        _centre_lines_in_circle(msp, ext[view], sym[view], c, R, o, sc)
         if clipped:
-            centre_marks(msp, inside, frames[view], clipped, e, o, sc, sym[view], pixels=150)
+            centre_marks(msp, _circles_in(circles, frames[view], c, R), frames[view], clipped, ext[view],
+                         o, sc, sym[view], pixels=150)
 
 
-def origin_symbol(msp, x, y, size=7):
+def origin_symbol(msp, x, y, size=7.0):
     """Hole table origin: arrows along the view's +X and +Y."""
     msp.add_circle((x, y), 0.6, dxfattribs={"layer": "HOLES"})
     for u, label, align in (((1, 0), "X", "MIDDLE_LEFT"), ((0, 1), "Y", "BOTTOM_CENTER")):
@@ -599,6 +742,48 @@ class Occupancy:
         elif kind == "DIMENSION":
             for v in e.virtual_entities():
                 self.entity(v)
+
+
+def place_arrows(msp, occ, lay, frames, ortho, arrows):
+    """ISO 128-3 reference arrows on a main view, pointing the way an extra view looks."""
+    for letter, d, points in arrows:
+        best = None
+        for view in ortho:
+            dv, yv = frames[view]
+            if abs(np.dot(d, dv)) > 1e-6:
+                continue  # the extra view's direction must lie in this view's plane
+            xv = np.cross(yv, dv)
+            u = np.array([np.dot(d, xv), np.dot(d, yv)])  # towards the viewer of the extra view
+            o, s = view_place(lay, view)
+            r = lay["rects"][view]
+            aim = to_paper(np.mean([[p @ xv, p @ yv] for p in points], axis=0), o, s)
+            k = 0 if abs(u[0]) > 0.5 else 1  # the arrow runs along x (k = 0) or y (k = 1)
+            edge = r[k + 2] if u[k] > 0 else r[k]
+            lo, hi = r[1 - k], r[3 - k]
+            for inset in (0, 6, 12, 18):
+                for shift in (0, 6, -6, 12, -12, 20, -20, 30, -30, 45, -45):
+                    head = np.array(aim, float)
+                    head[k] = edge + u[k] * (2.5 - inset)
+                    head[1 - k] = np.clip(aim[1 - k] + shift, lo, hi)
+                    tail = head + u * 8
+                    w = text_width(letter, 5)
+                    far = tail + u * (1.5 + (w if k == 0 else 5))
+                    box = (min(head[0], far[0]) - w / 2 - 1, min(head[1], far[1]) - 2.5,
+                           max(head[0], far[0]) + w / 2 + 1, max(head[1], far[1]) + 2.5)
+                    cost = 10 * occ.cost(box) + abs(shift) + 3 * inset
+                    if best is None or cost < best[0]:
+                        best = (cost, head, tail, u, box)
+        if best is None:
+            continue
+        _, head, tail, u, box = best
+        side = np.array([-u[1], u[0]])
+        msp.add_line(tuple(tail), tuple(head + u * 2.4), dxfattribs={"layer": "HOLES"})
+        msp.add_solid([tuple(head), tuple(head + u * 2.5 + side * 0.8), tuple(head + u * 2.5 - side * 0.8)],
+                      dxfattribs={"layer": "HOLES"})
+        align = {(0, 1): "BOTTOM_CENTER", (0, -1): "TOP_CENTER", (1, 0): "MIDDLE_LEFT",
+                 (-1, 0): "MIDDLE_RIGHT"}[tuple(int(round(v)) for v in u)]
+        text(msp, letter, *(tail + u * 1.5), h=5, align=align, layer="HOLES")
+        occ.box(box)
 
 
 def place_tags(msp, occ, marks):
@@ -790,33 +975,36 @@ def build(shape, cfg):
         up = g_up if up == "auto" else up
     frames = geometry.view_frames(front, up, None if views["iso"] == "auto" else views["iso"])
     geometry.prepare(shape)
-    lines = {name: geometry.project(shape, d, y) for name, (d, y) in frames.items()}
+    lines = {name: geometry.project(shape, *frames[name]) for name in ("front", "top", "left", "iso")}
     ext = view_extents(env, {k: v for k, v in frames.items() if k != "iso"})
     ext["iso"] = geometry.extents(lines["iso"])
     ortho = ["front", "top", "left"]
     if geometry.same_view(lines["left"], lines["front"], ext["left"], ext["front"]):
         ortho.remove("left")  # e.g. a turned part: the side view repeats the front view
-        del ext["left"]
 
-    sym = {name: geometry.symmetry(lines[name]) for name in ortho}
-    rows, types, warnings = plan_holes(geometry.holes(shape), frames, ortho, ext, sym, cfg)
-    origins = {v: hole_origin(v, frames[v], ext[v], sym[v], cfg.get("datum")) for v in ortho}
-    at_centre = {v: bool(sym[v][0] and sym[v][1] and np.allclose(
-        origins[v], ((ext[v][0] + ext[v][2]) / 2, (ext[v][1] + ext[v][3]) / 2), atol=1e-6)) for v in ortho}
-    tables = hole_tables(rows, types, ortho, origins, at_centre)
+    rows, types, warnings = plan_holes(geometry.holes(shape), frames, ortho, cfg)
+    needs = aux_needs(rows, ortho, ext)
+    for need in needs:
+        lines[need["view"]] = geometry.project(shape, *frames[need["view"]])
+    shown = ortho + [n["view"] for n in needs]
+    sym = {name: geometry.symmetry(lines[name]) for name in shown}
+    origins, at_centre, table_notes = hole_origins(rows, shown, frames, ext, sym, cfg.get("datum"), needs)
+    titles = {v: f"{v.upper()} VIEW" for v in ortho} | {n["view"]: f"VIEW {n['letter']}" for n in needs}
+    tables = hole_tables(rows, types, shown, origins, table_notes, titles)
     widths, block = table_size(tables) if tables else (None, None)
     if rows and (cfg.get("datum") or {}).get("confirm"):
         warnings.append("datum.confirm is still true - check the hole table origin")
 
     notes = general_notes(cfg) + list(cfg["notes"] or [])
-    lay = choose_layout(ext, notes_height(notes), cfg["sheet"], cfg["scale"], block)
+    lay = choose_layout({v: ext[v] for v in ortho}, notes_height(notes), cfg["sheet"], cfg["scale"],
+                        block, needs)
     s = lay["scale"]
     doc = new_doc()
     msp = doc.modelspace()
     draw_frame(msp, lay)
 
     info = {"sheet": lay["sheet"], "scale": s, "front": front, "up": up, "views": ortho,
-            "dims": [], "view_rects": dict(lay["rects"]), "warnings": warnings}
+            "dims": [], "view_rects": dict(lay["rects"]), "warnings": warnings, "extra_views": []}
     circles = geometry.circles(shape)
     for name in ortho:
         o = np.array(lay["origins"][name])
@@ -837,7 +1025,11 @@ def build(shape, cfg):
         value = prefix.replace("%%c", "Ø") + str(round(dim.get_measurement() / s, 4))
         info["dims"].append((view, f"({value})" if ref else value))
 
-    details = plan_details(rows, lay, ortho) if rows else []
+    info["view_rects"].update(draw_aux(msp, lay, lines, frames, ext, sym, circles))
+    info["extra_views"] = [f"{a['letter']} from the {v}" if v in ("left", "right") else
+                           f"{a['letter']} from {'below' if v == 'bottom' else 'behind'}"
+                           for v, a in lay["aux"].items()]
+    details = plan_details(rows, lay, shown) if rows else []
     for d in details:  # the detail circle itself; its label sits above it
         cx, cy, rr = *d["paper"], d["R"] * d["scale"]
         info["view_rects"][f"detail {d['letter']}"] = (cx - rr, cy - rr, cx + rr, cy + rr)
@@ -856,11 +1048,12 @@ def build(shape, cfg):
                  align="TOP_CENTER")
 
     draw_details(msp, details, lines, frames, ext, sym, circles, lay)
-    draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details)
-    info["holes"] = [{"tag": r["tag"], "type": r["key"], "view": r["view"], "hidden": bool(r["hidden"]),
+    draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details, frames, ortho)
+    info["holes"] = [{"tag": r["tag"], "type": r["key"],
+                      "view": r["view"] if r["view"] in ortho else f"view {lay['aux'][r['view']]['letter']}",
                       "x": round(float(r["xy"][0] - origins[r["view"]][0]), 3),
                       "y": round(float(r["xy"][1] - origins[r["view"]][1]), 3),
-                      "point": np.round(r["entry"]["point"], 3).tolist(),
+                      "point": np.round(r["point"], 3).tolist(),
                       "axis": np.round(r["hole"]["axis"], 4).tolist(),
                       "diameter": round(r["hole"]["diameter"], 3), "through": r["hole"]["through"],
                       "depth": None if r["entry"]["depth"] is None else round(r["entry"]["depth"], 3),
@@ -877,42 +1070,44 @@ def build(shape, cfg):
     return doc, info
 
 
-def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details):
-    """Hidden holes dashed, ISO 6410 thread arcs, table origins, tags and the tables.
+def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details, frames, ortho):
+    """ISO 6410 thread arcs, table origins, reference arrows, tags and the tables.
 
-    Holes inside a detail view are annotated there, at the detail's scale.
+    Every hole is annotated in the view (or detail) where its opening is visible.
     """
     if not rows:
         return
     specs = {t["key"]: t["spec"] for t in types}
-    spots = {}  # holes drawn on the same spot (near and far side) share one tag
+    spots = {}  # tags of holes drawn on the same spot are combined
     for r in rows:
         d = r.get("detail")
-        o, s = (d["origin"], d["scale"]) if d else (np.array(lay["origins"][r["view"]]), lay["scale"])
+        o, s = (d["origin"], d["scale"]) if d else view_place(lay, r["view"])
         cx, cy = to_paper(r["xy"], o, s)
         rp = r["hole"]["diameter"] / 2 * s
         spec = specs[r["key"]]
-        if r["hidden"]:
-            msp.add_circle((cx, cy), rp, dxfattribs={"layer": "HIDDEN", "ltscale": 0.25})
-        elif spec.get("thread") and not spec.get("confirm"):
+        if spec.get("thread") and not spec.get("confirm"):
             major = holes.thread_major(str(spec["thread"]))
             if major and major > r["hole"]["diameter"]:  # thin 3/4 circle, open at the top right
                 msp.add_arc((cx, cy), major / 2 * s, 100, 350, dxfattribs={"layer": "VISIBLE", "lineweight": 25})
         key = (r["view"], round(cx, 1), round(cy, 1))
         spots.setdefault(key, [[], cx, cy, rp])[0].append(r["tag"])
         spots[key][3] = max(spots[key][3], rp)
-    for view in {r["view"] for r in rows}:
+    for view in origins:
         if not at_centre[view]:
             inside = [d for d in details if d["view"] == view
                       and np.hypot(*(origins[view] - d["centre"])) < d["R"]]
-            o, s = ((inside[0]["origin"], inside[0]["scale"]) if inside
-                    else (np.array(lay["origins"][view]), lay["scale"]))
-            origin_symbol(msp, *to_paper(origins[view], o, s))
+            o, s = (inside[0]["origin"], inside[0]["scale"]) if inside else view_place(lay, view)
+            clear = min((np.hypot(*(r["xy"] - origins[view])) * s - r["hole"]["diameter"] / 2 * s - 4.5
+                         for r in rows if r["view"] == view), default=7)  # arrow plus its letter
+            origin_symbol(msp, *to_paper(origins[view], o, s), size=float(np.clip(clear, 3, 7)))
     occ = Occupancy(lay)
     for e in msp:
         occ.entity(e)
     occ.box(lay["title_block"])
     occ.box(lay["table"])
+    arrows = [(a["letter"], frames[view][0], [r["point"] for r in rows if r["view"] == view])
+              for view, a in lay["aux"].items()]
+    place_arrows(msp, occ, lay, frames, ortho, arrows)
     place_tags(msp, occ, [(", ".join(tags), cx, cy, rp) for tags, cx, cy, rp in spots.values()])
     draw_tables(msp, lay["table"], tables, widths)
 

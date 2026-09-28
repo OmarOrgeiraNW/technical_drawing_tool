@@ -177,6 +177,9 @@ def view_frames(front, up, iso=None):
         "front": (d, y),
         "top": (y, -d),     # seen from above
         "left": (-x, y),    # seen from the left
+        "bottom": (-y, d),  # seen from below
+        "right": (x, y),    # seen from the right
+        "rear": (-d, y),    # seen from behind
         "iso": (iso_d, iso_y / np.linalg.norm(iso_y)),
     }
 

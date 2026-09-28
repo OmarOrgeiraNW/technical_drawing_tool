@@ -2,13 +2,14 @@
  {
   "tag": "A1",
   "type": "Ø1.56 THRU",
+  "view": "view Z",
   "diameter": 1.56,
   "through": true,
   "depth": null,
   "point": [
-   -23.415,
-   8.415,
-   -44.783
+   -6.585,
+   -8.415,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -19,13 +20,14 @@
  {
   "tag": "A2",
   "type": "Ø1.56 THRU",
+  "view": "view Z",
   "diameter": 1.56,
   "through": true,
   "depth": null,
   "point": [
-   6.585,
-   8.415,
-   -44.783
+   23.415,
+   -8.415,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -36,13 +38,14 @@
  {
   "tag": "A3",
   "type": "Ø1.56 THRU",
+  "view": "view Z",
   "diameter": 1.56,
   "through": true,
   "depth": null,
   "point": [
-   -6.585,
-   -8.415,
-   -44.783
+   -23.415,
+   8.415,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -53,13 +56,14 @@
  {
   "tag": "A4",
   "type": "Ø1.56 THRU",
+  "view": "view Z",
   "diameter": 1.56,
   "through": true,
   "depth": null,
   "point": [
-   23.415,
-   -8.415,
-   -44.783
+   6.585,
+   8.415,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -70,13 +74,14 @@
  {
   "tag": "B1",
   "type": "Ø1.70 THRU",
+  "view": "view Z",
   "diameter": 1.7,
   "through": true,
   "depth": null,
   "point": [
-   -6.585,
-   8.415,
-   -44.783
+   -23.415,
+   -8.415,
+   -48.083
   ],
   "axis": [
    0.0,
@@ -87,13 +92,14 @@
  {
   "tag": "B2",
   "type": "Ø1.70 THRU",
+  "view": "view Z",
   "diameter": 1.7,
   "through": true,
   "depth": null,
   "point": [
-   23.415,
-   8.415,
-   -44.783
+   6.585,
+   -8.415,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -104,13 +110,14 @@
  {
   "tag": "B3",
   "type": "Ø1.70 THRU",
+  "view": "view Z",
   "diameter": 1.7,
   "through": true,
   "depth": null,
   "point": [
-   -23.415,
-   -8.415,
-   -44.783
+   -6.585,
+   8.415,
+   -48.083
   ],
   "axis": [
    0.0,
@@ -121,13 +128,14 @@
  {
   "tag": "B4",
   "type": "Ø1.70 THRU",
+  "view": "view Z",
   "diameter": 1.7,
   "through": true,
   "depth": null,
   "point": [
-   6.585,
-   -8.415,
-   -44.783
+   23.415,
+   8.415,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -138,13 +146,14 @@
  {
   "tag": "C1",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    -15.0,
-   11.9,
-   -44.783
+   -11.9,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -155,13 +164,14 @@
  {
   "tag": "C2",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    15.0,
-   11.9,
-   -44.783
+   -11.9,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -172,13 +182,14 @@
  {
   "tag": "C3",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    -26.9,
    0.0,
-   -44.783
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -189,13 +200,14 @@
  {
   "tag": "C4",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    -3.1,
    -0.0,
-   -44.783
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -206,13 +218,14 @@
  {
   "tag": "C5",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    3.1,
    -0.0,
-   -44.783
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -223,13 +236,14 @@
  {
   "tag": "C6",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    26.9,
    0.0,
-   -44.783
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -240,13 +254,14 @@
  {
   "tag": "C7",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    -15.0,
-   -11.9,
-   -44.783
+   11.9,
+   -48.083
   ],
   "axis": [
    -0.0,
@@ -257,13 +272,14 @@
  {
   "tag": "C8",
   "type": "Ø2.20 THRU",
+  "view": "view Z",
   "diameter": 2.2,
   "through": true,
   "depth": null,
   "point": [
    15.0,
-   -11.9,
-   -44.783
+   11.9,
+   -48.083
   ],
   "axis": [
    -0.0,

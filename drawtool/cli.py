@@ -47,6 +47,8 @@ def draw(step, yaml_path, out):
     (out / f"{stem}.png").write_bytes(sheet.render(doc, info["sheet"], "png"))
     print(f"wrote {stem}.dxf/.pdf/.png to {out}  ({info['sheet']}, scale {sheet.fmt_scale(info['scale'])}, "
           f"front {info['front']}, up {info['up']}, {len(info['holes'])} holes)")
+    if info["extra_views"]:
+        print("extra views for holes: " + ", ".join(info["extra_views"]))
     for w in info["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
     for p in info["problems"]:

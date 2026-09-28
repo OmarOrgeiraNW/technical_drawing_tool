@@ -23,11 +23,17 @@ EXPECTED = {
         "size": (58.6, 34.407, 110.33), "front": "-Y", "up": "+Z", "volume": 8034.1,
         "sheet": "A3", "scale": 1, "views": ["front", "top", "left"],
         "dims": ["(58.6)", "(110.33)", "(34.407)"],
+        # all flange holes are seen from below; from above the horn hides some of them
+        "extra_views": {"Z from below"},
+        "hole_sizes": {"4× Ø1.56 THRU", "4× Ø1.7 THRU", "8× Ø2.2 THRU"},
     },
     "2026_03_26-Design-NW-Cassegrain-v03-REFERENCE.STEP": {
         "size": (291.06, 291.06, 148.9775), "front": "-Y", "up": "+Z", "volume": 103422.1,
         "sheet": "A3", "scale": 0.5, "views": ["front", "top"],  # side view repeats the front
         "dims": ["(148.9775)", "(Ø291.06)"],
+        # M5 holes under the dish seen from below; the feed block's back face from behind
+        "extra_views": {"Z from below", "W from behind"},
+        "hole_sizes": {"4× Ø1.25 depth 6.5", "Ø2 THRU", "8× Ø4.2 depth 8.68"},
     },
 }
 
@@ -53,6 +59,9 @@ def test_drawing(sample, tmp_path):
     assert info["views"] == exp["views"]
     assert [value for _, value in info["dims"]] == exp["dims"]
     assert info["mass_g"] == pytest.approx(exp["volume"] * 2.67 / 1000, rel=1e-4)
+    assert set(info["extra_views"]) == exp["extra_views"]
+    texts = {e.dxf.text for e in doc.modelspace() if e.dxftype() == "TEXT"}
+    assert exp["hole_sizes"] <= texts  # equal holes grouped under one size with their count
     assert info["problems"] == []
     doc.saveas(tmp_path / "part.dxf")
     assert sheet.render(doc, info["sheet"], "pdf")[:4] == b"%PDF"
@@ -93,6 +102,7 @@ def test_holes_match_features_json(sample, tmp_path):
     for want in expected:
         got = next(h for h in found if h["tag"] == want["tag"])
         assert got["type"] == want["type"]
+        assert got["view"] == want["view"]  # a view in which the hole's opening is visible
         assert got["through"] == want["through"]
         assert got["point"] == pytest.approx(want["point"], abs=0.01)
         assert got["axis"] == pytest.approx(want["axis"], abs=1e-3)
@@ -150,7 +160,8 @@ def test_coloured_plate(tmp_path):
     assert red["spec"]["thread"] == "M4x0.7-6H" and red["spec"]["confirm"]  # guessed, not accepted
     assert "red faces" in red["spec"]["note"]
     assert {h["type"]: h["colours"] for h in info["holes"]}["Ø3.30 depth 6.00"] == ["red"]
-    assert all(h["view"] == "top" and not h["hidden"] for h in info["holes"])
+    assert all(h["view"] == "top" for h in info["holes"])
+    assert info["extra_views"] == []
     assert info["problems"] == []
 
 

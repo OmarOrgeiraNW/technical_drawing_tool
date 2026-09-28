@@ -61,11 +61,16 @@ pytest
   countersinks and drill points; through or blind is decided by probing past
   each end, and a hole must open onto a flat face (so waveguide sections inside
   the part are not holes). Modelled threads are recognised by their pitch.
-- Each hole type gets a letter and each hole a tag (A1, A2, ...) in the view that
-  shows it as a circle. Holes whose opening is blocked or on the far side are
-  drawn dashed and marked `hidden` in the table.
-- One hole table per view. X/Y run from the centre lines when the view is
-  symmetric, otherwise from an origin marked in the view (`datum.origin`:
+- Holes are marked only in a view where their opening is directly visible.
+  Equal holes (same type) stay together in the first view that shows all of
+  them. When none of the front, top and left views shows them, an extra view is
+  added (ISO 128-3 reference-arrow method: a letter above the view and an arrow
+  with the same letter on a main view): the whole view from below, the right or
+  behind, or an enlarged partial view when the holes sit in a small area.
+- Each hole type gets a letter and each hole a tag (A1, A2, ...). One hole
+  table per view; equal holes share one SIZE cell with their count, e.g.
+  `4× Ø1.56 THRU`. X/Y run from the centre lines when the view is symmetric,
+  otherwise from an origin marked in the view (`datum.origin`:
   auto | centre | corner | [x, y, z]).
 - Thread guesses compare the drill diameter with the internal-thread minor
   diameter limits (ISO 965-1 6H: M1.6-M12; ASME B1.1 2B: #1-64 to 3/8-16).
