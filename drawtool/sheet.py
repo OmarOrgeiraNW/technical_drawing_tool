@@ -7,6 +7,7 @@ rendered from the same DXF, so all three outputs always agree.
 
 import itertools
 import textwrap
+from pathlib import Path
 
 import ezdxf
 import ezdxf.bbox
@@ -18,6 +19,8 @@ from ezdxf.fonts import fonts
 from ezdxf.math import BoundingBox2d
 
 from . import geometry
+
+fonts.font_manager.scan_folder(Path(__file__).parent / "fonts")  # same font on every OS
 
 SHEETS = {"A4": (297, 210), "A3": (420, 297)}  # landscape
 SCALES = [10, 5, 2, 1, 1 / 2, 1 / 5, 1 / 10]  # ISO 5455
@@ -98,6 +101,8 @@ def place(ext, sheet, s, notes_h):
 
 def choose_layout(ext, notes_h, sheet="auto", scale="auto"):
     """A4 if the part fits at 1:1 or larger, otherwise the best scale on A3."""
+    if sheet != "auto" and sheet not in SHEETS:
+        raise ValueError(f"unknown sheet size '{sheet}': use auto, A4 or A3")
     sheets = ["A4", "A3"] if sheet == "auto" else [sheet]
     scales = SCALES if scale == "auto" else [parse_scale(scale)]
     for i, name in enumerate(sheets):

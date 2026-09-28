@@ -1,11 +1,22 @@
 """STEP loading, view orientation and hidden-line projection."""
 
 import numpy as np
-from build123d import Compound, GeomType, import_step
+from OCP.Bnd import Bnd_Box
+from OCP.BRep import BRep_Tool
+from OCP.BRepAdaptor import BRepAdaptor_Surface
+from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
+from OCP.GeomAbs import GeomAbs_Plane
 from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+from OCP.GProp import GProp_GProps
 from OCP.HLRAlgo import HLRAlgo_Projector
 from OCP.HLRBRep import HLRBRep_PolyAlgo, HLRBRep_PolyHLRToShape
+from OCP.IFSelect import IFSelect_RetDone
+from OCP.STEPControl import STEPControl_Reader
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
+from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopoDS import TopoDS
 
 AXES = {
     "+X": (1, 0, 0), "-X": (-1, 0, 0),
@@ -15,23 +26,44 @@ AXES = {
 
 
 def load_step(path):
-    return import_step(str(path))
+    """The STEP file's geometry as one OpenCascade shape."""
+    reader = STEPControl_Reader()
+    if reader.ReadFile(str(path)) != IFSelect_RetDone:
+        raise ValueError(f"cannot read STEP file {path}")
+    reader.TransferRoots()
+    return reader.OneShape()
+
+
+def _explore(shape, kind, cast):
+    exp = TopExp_Explorer(shape, kind)
+    while exp.More():
+        yield cast(exp.Current())
+        exp.Next()
 
 
 def envelope(shape):
-    bb = shape.bounding_box()
-    lo, hi = np.array(tuple(bb.min)), np.array(tuple(bb.max))
+    box = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, box, False, False)  # exact geometry, not the mesh
+    lo, hi = np.array(box.CornerMin().Coord()), np.array(box.CornerMax().Coord())
     return {"min": lo.round(4).tolist(), "max": hi.round(4).tolist(),
             "size": (hi - lo).round(4).tolist()}
 
 
 def planar_faces(shape, count=5):
     """Largest planar faces, biggest first (datum / front-view candidates)."""
-    faces = sorted((f for f in shape.faces() if f.geom_type == GeomType.PLANE),
-                   key=lambda f: -f.area)[:count]
-    return [{"area": round(f.area, 2),
-             "normal": np.round(tuple(f.normal_at()), 4).tolist(),
-             "center": np.round(tuple(f.center()), 3).tolist()} for f in faces]
+    faces = []
+    for face in _explore(shape, TopAbs_FACE, TopoDS.Face):
+        surface = BRepAdaptor_Surface(face)
+        if surface.GetType() != GeomAbs_Plane:
+            continue
+        props = GProp_GProps()
+        BRepGProp.SurfaceProperties_s(face, props)
+        normal = np.array(surface.Plane().Axis().Direction().Coord())
+        if face.Orientation() == TopAbs_REVERSED:
+            normal = -normal
+        faces.append({"area": round(props.Mass(), 2), "normal": np.round(normal, 4).tolist(),
+                      "center": np.round(props.CentreOfMass().Coord(), 3).tolist()})
+    return sorted(faces, key=lambda f: -f["area"])[:count]
 
 
 def nearest_axis(v):
@@ -88,7 +120,7 @@ def _parse_direction(text):
 
 
 def mesh(shape, deflection):
-    BRepMesh_IncrementalMesh(shape.wrapped, deflection, False, 0.2, True)
+    BRepMesh_IncrementalMesh(shape, deflection, False, 0.2, True)
 
 
 def project(shape, direction, up):
@@ -100,7 +132,7 @@ def project(shape, direction, up):
     ax = gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(*direction))
     ax.SetYDirection(gp_Dir(*up))
     algo = HLRBRep_PolyAlgo()
-    algo.Load(shape.wrapped)
+    algo.Load(shape)
     algo.Projector(HLRAlgo_Projector(ax))
     algo.Update()
     hlr = HLRBRep_PolyHLRToShape()
@@ -109,9 +141,10 @@ def project(shape, direction, up):
     for comp in (hlr.VCompound(), hlr.OutLineVCompound()):
         if comp.IsNull():
             continue
-        for e in Compound(comp).edges():
-            a, b = e.start_point(), e.end_point()
-            segments.append(((a.X, a.Y), (b.X, b.Y)))
+        for e in _explore(comp, TopAbs_EDGE, TopoDS.Edge):
+            a = BRep_Tool.Pnt_s(TopExp.FirstVertex_s(e))
+            b = BRep_Tool.Pnt_s(TopExp.LastVertex_s(e))
+            segments.append(((a.X(), a.Y()), (b.X(), b.Y())))
     return chain(segments)
 
 

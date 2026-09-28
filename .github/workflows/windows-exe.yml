@@ -1,0 +1,57 @@
+name: Windows exe
+
+on:
+  push:
+    paths:
+      - "drawtool/**"
+      - "packaging/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/windows-exe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install ".[test]" pyinstaller
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Build DrawTool.exe
+        run: pyinstaller --noconfirm packaging/DrawTool.spec
+
+      - name: Smoke test - draw both samples with the packaged exe
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          if (-not (Test-Path dist/DrawTool/_internal/drawtool/fonts/DejaVuSans.ttf)) { throw "font not bundled" }
+          foreach ($step in Get-ChildItem samples/*.STEP) {
+            $p = Start-Process dist/DrawTool/DrawTool.exe -Wait -PassThru `
+                 -ArgumentList "draw", "`"$($step.FullName)`"", "-o", "smoke"
+            if (Test-Path drawtool-error.log) { Get-Content drawtool-error.log }
+            if ($p.ExitCode -ne 0) { throw "DrawTool.exe failed on $($step.Name)" }
+          }
+          Get-ChildItem smoke
+          if ((Get-ChildItem smoke/*.pdf).Count -ne 2 -or (Get-ChildItem smoke/*.dxf).Count -ne 2) {
+            throw "missing drawings"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DrawTool-windows
+          path: dist/DrawTool
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-drawings
+          path: smoke
