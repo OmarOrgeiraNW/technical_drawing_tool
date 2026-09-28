@@ -91,13 +91,43 @@ def test_first_angle_frames_share_axes():
     assert np.allclose(right["left"], frames["front"][0])  # front face points right in the left view
 
 
-@pytest.mark.parametrize("size, fields", [("A4", (6, 4)), ("A3", (8, 6))])
+@pytest.mark.parametrize("size, fields", [("A4", (6, 4)), ("A3", (8, 6)), ("A2", (12, 8)), ("A1", (16, 12)),
+                                          ("A0", (24, 16))])
 def test_grid_reference_fields(size, fields):
-    """ISO 5457: A4 landscape has 6 x 4 fields, A3 8 x 6."""
+    """ISO 5457 grid: A4 landscape has 6 x 4 fields, A3 8 x 6 ... A0 24 x 16."""
     w, h = sheet.SHEETS[size]
     cols = sheet._fields(w / 2, sheet.LEFT, w - sheet.RIGHT)
     rows = sheet._fields(h / 2, sheet.BOTTOM, h - sheet.TOP)
     assert (len(cols) - 1, len(rows) - 1) == fields
+
+
+def test_chosen_sheet_adapts():
+    """A chosen sheet sets the space: the horn grows to 2:1 on A2, and A4 is too small
+    for its hole table and extra view at any scale, which is said plainly."""
+    path = SAMPLES / "2026_09_16-Design-NW-HornQV-v01-REFERENCE.STEP"
+    shape = geometry.load_step(path)
+    cfg = partfile.load(None, path)
+    cfg["sheet"] = "A2"
+    _, info = sheet.build(shape, cfg)
+    assert (info["sheet"], info["scale"], info["section"]) == ("A2", 2, "W–W")
+    assert info["problems"] == []
+    cfg["sheet"] = "A4"
+    with pytest.raises(ValueError, match="do not fit on A4 at any scale; choose a larger sheet"):
+        sheet.build(shape, cfg)
+
+
+def test_split_tables():
+    """A long hole table continues in the next column, between groups of equal holes."""
+    def group(n):
+        return ([f"{n}× Ø2 THRU"], [(f"A{i}", "0.00", "0.00") for i in range(n)], None)
+
+    tables = [("HOLE TABLE - VIEW Z", "X/Y from datum B", [group(8), group(4), group(4)])]
+    cols = sheet.split_tables(tables, 2)
+    assert [[title for title, _, _ in c] for c in cols] == [["HOLE TABLE - VIEW Z"],
+                                                            ["HOLE TABLE - VIEW Z (cont.)"]]
+    assert [len(g) for c in cols for _, _, g in c] == [1, 2]
+    assert cols[0][0][1] == "" and cols[1][0][1] == "X/Y from datum B"  # the note ends the table
+    assert sheet.split_tables(tables, 1) == [tables]
 
 
 def test_density_from_material():

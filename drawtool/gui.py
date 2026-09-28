@@ -19,7 +19,7 @@ import yaml
 from . import cli, geometry, partfile, sheet
 
 DIRECTIONS = ["auto", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
-SHEETS = ["auto", "A4", "A3", "A2"]
+SHEETS = ["auto", "A4", "A3", "A2", "A1", "A0"]
 SCALES = ["auto", "5:1", "2:1", "1:1", "1:2", "1:5", "1:10"]
 ORIGINS = ["auto", "centre", "corner"]
 TITLE_FIELDS = [("title", "Title"), ("part_number", "Part number"), ("revision", "Revision"),

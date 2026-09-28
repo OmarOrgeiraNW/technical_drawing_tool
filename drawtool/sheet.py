@@ -22,7 +22,8 @@ from . import geometry, holes, partfile
 
 fonts.font_manager.scan_folder(Path(__file__).parent / "fonts")  # same font on every OS
 
-SHEETS = {"A4": (297, 210), "A3": (420, 297), "A2": (594, 420)}  # landscape, smallest first
+SHEETS = {"A4": (297, 210), "A3": (420, 297), "A2": (594, 420), "A1": (841, 594),
+          "A0": (1189, 841)}  # ISO 216, landscape, smallest first
 SCALES = [10, 5, 2, 1, 1 / 2, 1 / 5, 1 / 10]  # ISO 5455
 LEFT, BOTTOM, RIGHT, TOP = 20, 10, 10, 10  # ISO 5457 frame margins
 FONT = "DejaVuSans.ttf"
@@ -74,8 +75,12 @@ def _inside(r, box, tol=1e-3):
     return r[0] >= box[0] - tol and r[1] >= box[1] - tol and r[2] <= box[2] + tol and r[3] <= box[3] + tol
 
 
-def place(ext, sheet, s, notes_h):
-    """Place front/top/left (first angle) at scale s, or None if they do not fit."""
+def place(ext, sheet, s, notes_h, align="centre"):
+    """Place front/top/left (first angle) at scale s, or None if they do not fit.
+
+    align "centre" centres the group across the sheet when it fits so; "left"
+    puts it at the left edge, leaving one large free area on the right.
+    """
     w, h = SHEETS[sheet]
     area = (LEFT, BOTTOM, w - RIGHT, h - TOP)
     inner = (area[0] + PAD, area[1] + PAD, area[2] - PAD, area[3] - PAD)
@@ -86,7 +91,8 @@ def place(ext, sheet, s, notes_h):
     th = _size(ext["top"])[1] * s
     group_w = DIM_SPACE + fw + GAP + lw
     free_w = inner[2] - inner[0]
-    for gx, gtop in ((inner[0] + (free_w - group_w) / 2, inner[3]), (inner[0], inner[3])):
+    spots = [(inner[0] + (free_w - group_w) / 2, inner[3])] if align == "centre" else []
+    for gx, gtop in spots + [(inner[0], inner[3])]:
         fx, ftop = gx + DIM_SPACE, gtop - DIM_SPACE
         rects = {
             "front": (fx, ftop - fh, fx + fw, ftop),
@@ -111,53 +117,115 @@ def place(ext, sheet, s, notes_h):
     return None
 
 
-def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=(), section=None, slot=False):
-    """A4 if the part fits at 1:1 or larger, otherwise the best scale on A3;
-    A2 only when A3 has no room for the section view at the drawing scale.
+AUTO_SHEETS = ("A4", "A3", "A2")  # "auto" chooses among these; A1 and A0 on request
 
-    `block` is the size of the hole tables, `needs` the extra views for holes
-    and `section` the extents of the section view; all must fit next to the
-    main views. With `slot` the section first tries the side view's place
-    (right of the front view), else it goes wherever there is room.
+
+def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=(), section=None, slot=False):
+    """Sheet and scale, and room for everything around the main views.
+
+    auto: A4 if the part fits at 1:1 or larger, otherwise the best scale on A3;
+    A2 only when A3 has no room for the section view at the drawing scale.
+    A chosen sheet adapts to its space instead: the largest scale that fits,
+    hole tables side by side when one column is too tall, the section reduced,
+    and the section left out (lay["section_dropped"]) only when the main views
+    would otherwise shrink more than one ISO scale step.
+
+    `block` is the hole tables' {"width", "heights"}, `needs` the extra views for
+    holes and `section` the extents of the section view. With `slot` the section
+    first tries the side view's place (right of the front view).
     """
     if sheet != "auto" and sheet not in SHEETS:
         raise ValueError(f"unknown sheet size '{sheet}': use auto, {', '.join(SHEETS)}")
-    sheets = list(SHEETS) if sheet == "auto" else [sheet]
+    sheets = list(AUTO_SHEETS) if sheet == "auto" else [sheet]
     scales = SCALES if scale == "auto" else [parse_scale(scale)]
-    variants = [({**ext, "section": section}, None)] if section and slot else []
-    variants.append((ext, _size(section) if section else None))
 
-    def first_fit(name):
+    def attempt(name, s, keep_section):
+        variants = [({**ext, "section": section}, None)] if keep_section and section and slot else []
+        variants.append((ext, _size(section) if keep_section and section else None))
+        for views, free_section in variants:
+            for align in ("centre", "left"):
+                for columns in (1, 2, 3) if block else (1,):
+                    lay = place(views, name, s, notes_h, align)
+                    if lay and (not block or _reserve(lay, block, columns)) and \
+                            (not free_section or _reserve_section(lay, free_section)) and _reserve_aux(lay, needs):
+                        lay["section_dropped"] = bool(section) and not keep_section
+                        return lay
+        return None
+
+    def best(name):
+        natural = [s for s in scales if place(ext, name, s, notes_h)]  # the main views alone
+        floor = natural[min(1, len(natural) - 1)] if natural and section else 0
         for s in scales:
-            for views, free_section in variants:
-                lay = place(views, name, s, notes_h)
-                if lay and (not block or _reserve(lay, block)) and \
-                        (not free_section or _reserve_section(lay, free_section)) and _reserve_aux(lay, needs):
-                    return lay
+            if s >= floor and (lay := attempt(name, s, True)):
+                return lay
+        if section:  # no room for the section: leave it out rather than shrink everything further
+            return next((lay for s in scales if (lay := attempt(name, s, False))), None)
         return None
 
     fallback = None
     for name in sheets:
-        lay = first_fit(name)
+        lay = best(name)
         if lay is None:
             continue
-        full = "section" in lay["rects"] or lay.get("section", {}).get("scale", lay["scale"]) == lay["scale"]
+        full = not lay["section_dropped"] and ("section" in lay["rects"] or
+                                               lay.get("section", {}).get("scale", lay["scale"]) == lay["scale"])
         if scale != "auto" or sheet != "auto" or (full and (name != "A4" or lay["scale"] >= 1)):
             return lay
         if name != "A4":
             fallback = fallback or lay  # section reduced: a larger sheet may hold it at full scale
     if fallback:
         return fallback
-    raise ValueError("views do not fit; set 'sheet' and/or 'scale' in the part YAML")
+    where = sheet if sheet != "auto" else AUTO_SHEETS[-1]
+    raise ValueError(f"the views, hole tables and extra views do not fit on {where}"
+                     + (f" at {scale}; choose a smaller scale or a larger sheet" if scale != "auto"
+                        else " at any scale; choose a larger sheet"))
 
 
-def _reserve(lay, block):
-    """Put the hole tables in the top-right corner of the largest free area."""
-    r, fit = free_rect(lay, block, label=0)
+def _table_height(groups):
+    return ROW * (3 + sum(max(len(r), len(ls)) for ls, r, _ in groups))  # title, header, rows, note
+
+
+def split_tables(tables, n):
+    """The tables, in order, in up to n columns of about equal height. A table longer
+    than its share continues in the next column, between two groups of equal holes."""
+    target = (sum(_table_height(g) for _, _, g in tables) + PAD * (len(tables) - 1)) / n
+    cols, used = [[]], 0.0
+    for title, note, groups in tables:
+        rest, cont = list(groups), False
+        while rest:
+            last = len(cols) == n
+            gap = PAD if cols[-1] else 0.0
+            take = len(rest)
+            if not last:
+                take = 0
+                while take < len(rest) and used + gap + _table_height(rest[:take + 1]) <= target + 1e-6:
+                    take += 1
+                if take == 0 and cols[-1]:
+                    cols.append([])
+                    used = 0.0
+                    continue
+                take = max(take, 1)
+            piece, rest = rest[:take], rest[take:]
+            cols[-1].append((title + (" (cont.)" if cont else ""), "" if rest else note, piece))
+            used += gap + _table_height(piece)
+            cont = True
+            if rest and not last:
+                cols.append([])
+                used = 0.0
+    return [c for c in cols if c]
+
+
+def _reserve(lay, block, columns=1):
+    """Put the hole tables (in `columns` side by side) in the top-right corner of the largest free area."""
+    cols = split_tables(block["tables"], columns)
+    size = (len(cols) * block["width"] + (len(cols) - 1) * PAD,
+            max(sum(_table_height(g) for _, _, g in c) + PAD * (len(c) - 1) for c in cols))
+    r, fit = free_rect(lay, size, label=0)
     if not r or fit < 1:
         return False
     x1, y1 = r[2] - PAD, r[3] - PAD
-    lay["table"] = (x1 - block[0], y1 - block[1], x1, y1)
+    lay["table"] = (x1 - size[0], y1 - size[1], x1, y1)
+    lay["table_columns"] = cols
     lay["zones"].append(lay["table"])
     return True
 
@@ -286,14 +354,16 @@ def draw_frame(msp, lay):
     for i, (a, b) in enumerate(zip(xs[:-1], xs[1:]), 1):
         for y in (y1 + 5, y0 - 5):
             text(msp, str(i), (a + b) / 2, y, align="MIDDLE_CENTER", layer="FRAME")
-    for letter, (a, b) in zip("ABCDEFGH", zip(ys[:-1], ys[1:])):
+    for letter, (a, b) in zip("ABCDEFGHJKLMNPQRSTUVWXYZ", zip(ys[:-1], ys[1:])):  # no I or O
         for x in (x0 - 5, x1 + 5):
             text(msp, letter, x, (a + b) / 2, align="MIDDLE_CENTER", layer="FRAME")
 
 
 def _fields(centre, lo, hi, size=50):
-    """Field boundaries every `size` mm from the centring mark, clipped to the frame."""
-    inner = [centre + k * size for k in range(-10, 11) if lo < centre + k * size < hi]
+    """Field boundaries every `size` mm from the centring mark, clipped to the frame;
+    a sliver (under 15 mm, as on A1 and A0) at an edge joins its neighbour."""
+    edge = 0.3 * size
+    inner = [centre + k * size for k in range(-12, 13) if lo + edge <= centre + k * size <= hi - edge]
     return [lo, *inner, hi]
 
 
@@ -716,16 +786,20 @@ def table_size(tables):
         widths.append(max(max(fcf_width(f) for f in frames), text_width(POSITION, TAG_H)) + 3)
     title_w = max(max(text_width(t, TAG_H + 0.5), text_width(n, TAG_H)) for t, n, _ in tables) + 3
     widths[3] += max(0, title_w - sum(widths))
-    height = sum(ROW * (3 + sum(max(len(r), len(ls)) for ls, r, _ in groups)) for _, _, groups in tables)
-    return widths, (sum(widths), height + PAD * (len(tables) - 1))
+    return widths, {"width": sum(widths), "tables": tables}
 
 
 POSITION = "POSITION"
 
 
-def draw_tables(msp, box, tables, widths):
-    """Hole tables; the SIZE (and POSITION) cell of a group of equal holes spans all its rows."""
-    x0, top = box[0], box[3]
+def draw_tables(msp, box, columns, widths):
+    """Hole tables, in columns side by side (from split_tables); the SIZE (and POSITION)
+    cell of a group of equal holes spans all its rows."""
+    for k, col in enumerate(columns):
+        _draw_table_column(msp, box[0] + k * (sum(widths) + PAD), box[3], col, widths)
+
+
+def _draw_table_column(msp, x0, top, tables, widths):
     xs = np.cumsum([x0] + widths)
     header = HEADER + ((POSITION,) if len(widths) > 4 else ())
     for title, note, groups in tables:
@@ -756,7 +830,8 @@ def draw_tables(msp, box, tables, widths):
             y -= height
         for xv in xs[1:-1]:
             msp.add_line((xv, bottom), (xv, top - ROW), dxfattribs={"layer": "FRAME"})
-        text(msp, note, x0, bottom - ROW + 1.5, h=TAG_H, align="LEFT")
+        if note:
+            text(msp, note, x0, bottom - ROW + 1.5, h=TAG_H, align="LEFT")
         top = bottom - ROW - PAD
 
 
@@ -938,12 +1013,15 @@ def cutting_plane(msp, lay, sec, details):
     r = lay["rects"]["front"]
     x = sec["at"] * s + o[0]
     top, bottom = r[3], r[1]
+    below = lay["rects"]["top"][3]  # the top view sits under the front view (first angle)
     for d in details:
         if d["view"] == "front":
             (cx, cy), rr = to_paper(d["centre"], o, s), d["R"] * s
             if abs(cx - x) < rr:
                 half = np.sqrt(rr * rr - (cx - x) ** 2)
-                top, bottom = max(top, cy + half), min(bottom, cy - half)
+                top = max(top, cy + half)
+                if cy - half - GAP > below:  # room for the end, arrow and letter before the top view
+                    bottom = min(bottom, cy - half)
     u = np.array([1.0, 0.0])  # the section looks from the left, i.e. to the right on the front view
     for y0, sign in ((top, 1), (bottom, -1)):
         a, b = np.array([x, y0 + sign * 1.0]), np.array([x, y0 + sign * 6.0])
@@ -952,7 +1030,7 @@ def cutting_plane(msp, lay, sec, details):
         msp.add_line(tuple(b), tuple(tip - 2.4 * u), dxfattribs={"layer": "DIMS"})
         msp.add_solid([tuple(tip), tuple(tip - 2.5 * u + (0, 0.8)), tuple(tip - 2.5 * u - (0, 0.8))],
                       dxfattribs={"layer": "DIMS"})
-        text(msp, sec["letter"], *(tip + 1.5 * u), h=5, align="MIDDLE_LEFT")
+        text(msp, sec["letter"], tip[0] + 1.5, tip[1] - 2.5 + sign * 0.5, h=5, align="LEFT")
 
 
 def origin_symbol(msp, x, y, size=7.0):
@@ -1459,6 +1537,9 @@ def build(shape, cfg):
                         needs, section=section and section["ext"],
                         slot="left" not in ortho)  # the section may take the place of a repeated side view
     in_slot = "section" in lay["rects"]
+    if lay["section_dropped"]:
+        section = None
+        warnings.append(f"no room for the section view on {lay['sheet']}: left out (a larger sheet shows it)")
     s = lay["scale"]
     doc = new_doc()
     msp = doc.modelspace()
@@ -1638,7 +1719,7 @@ def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, detail
               for view, a in lay["aux"].items()]
     place_arrows(msp, occ, lay, frames, ortho, arrows)
     place_tags(msp, occ, [(", ".join(tags), cx, cy, rp) for tags, cx, cy, rp in spots.values()])
-    draw_tables(msp, lay["table"], tables, widths)
+    draw_tables(msp, lay["table"], lay["table_columns"], widths)
 
 
 def mass_grams(shape, cfg):

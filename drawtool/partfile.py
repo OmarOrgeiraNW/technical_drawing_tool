@@ -94,7 +94,7 @@ title_block:
   status: "Draft"
   sheet: "1/1"
 
-sheet: auto                    # auto | A4 | A3 | A2
+sheet: auto                    # auto (A4, A3 or A2) | A4 | A3 | A2 | A1 | A0: the drawing adapts to it
 scale: auto                    # auto | "1:1" | "1:2" | "2:1" ...
 general_tolerance: "ISO 2768-mK"
 default_finish: "Ra 3.2"

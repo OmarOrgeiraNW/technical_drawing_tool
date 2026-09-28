@@ -56,9 +56,16 @@ pytest
   full circle, axis lines on visible cylinders seen from the side.
 - Overall envelope dimensions, each size once (one Ø on a round view), shown as
   reference dimensions `( )` unless `reference_envelope: false`.
-- Automatic sheet and scale: A4 if the part fits at 1:1 or larger, otherwise
-  the largest ISO 5455 scale on A3; A2 only when A3 has no room for the section
-  at the drawing scale. Override with `sheet` / `scale`.
+- Sheet: `auto` (default) takes A4 if the part fits at 1:1 or larger,
+  otherwise the largest ISO 5455 scale on A3; A2 only when A3 has no room for
+  the section at the drawing scale. Or choose the sheet yourself (`sheet`, or
+  *Sheet* on the Drawing tab: A4, A3, A2, A1, A0) and the drawing adapts to
+  it: the largest scale at which everything fits, the views placed left when
+  centring them splits the free space, hole tables continued in a second or
+  third column (marked "(cont.)"), extra views and the section reduced, and
+  the section left out (with a warning) only when keeping it would shrink the
+  main views by more than one scale step. If even that does not fit, the
+  message says so and suggests a larger sheet. `scale` fixes the scale too.
 - ISO 5457 frame with grid reference zones, ISO 7200 title block with mass
   (volume x density; density from `density` or the material name), general
   tolerance (ISO 2768-mK default), default surface texture, scale and
