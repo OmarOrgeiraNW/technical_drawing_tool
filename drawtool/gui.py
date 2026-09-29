@@ -16,9 +16,18 @@ from tkinter import filedialog, messagebox, ttk
 import pymupdf
 import yaml
 
-from . import cli, geometry, partfile, sheet
+from . import cli, edit, geometry, partfile, sheet
 
 DIRECTIONS = ["auto", "+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+CALLOUTS = {"Leader note": "note", "Hole callout": "hole", "Dimension": "dimension", "Balloon": "balloon"}
+CALLOUT_HINTS = {
+    "note": "Click the part (on a line: arrow, inside a face: dot),\nthen where the text goes.",
+    "hole": "Click a hole or port, then where the text goes.\nEmpty text = its size from the hole table.",
+    "dimension": "Click two points (hole centres, corners and lines snap),\nthen where the dimension line goes. "
+                 "Empty text = the\nmeasured value; <> stands for it, e.g. <> ±0.05",
+    "balloon": "Click the part, then where the balloon goes. Its text\nbecomes a numbered note "
+               "(or type the number of a note).",
+}
 SHEETS = ["auto", "A4", "A3", "A2", "A1", "A0"]
 SCALES = ["auto", "5:1", "2:1", "1:1", "1:2", "1:5", "1:10"]
 ORIGINS = ["auto", "centre", "corner"]
@@ -124,9 +133,11 @@ class App:
         form = ttk.Frame(tabs, padding=10)
         holes_tab = ttk.Frame(tabs, padding=(10, 10, 0, 10))
         marks_tab = ttk.Frame(tabs, padding=10)
+        edits_tab = ttk.Frame(tabs, padding=(10, 10, 0, 10))
         tabs.add(form, text="Drawing")
         tabs.add(holes_tab, text="Holes")
         tabs.add(marks_tab, text="Surfaces & datums")
+        tabs.add(edits_tab, text="Sections & callouts")
         self.preview = Preview(body)
         body.add(tabs, weight=0)
         body.add(self.preview, weight=1)
@@ -135,6 +146,7 @@ class App:
         self.hole_vars = {}
         self.picking = None
         self._build_marks(marks_tab)
+        self._build_edits(_scrollable(edits_tab))
 
         self.status = ttk.Label(root, text="Open a STEP file to start.", anchor="w", padding=(8, 4))
         self.status.pack(fill="x")
@@ -258,6 +270,102 @@ class App:
         self.fill_marks()
         self.generate()
 
+    def _build_edits(self, tab):
+        """Sections, callouts and moving items, all picked on the preview."""
+        bold = ("TkDefaultFont", 10, "bold")
+        grey = {"foreground": "#555", "justify": "left"}
+        ttk.Label(tab, text="Section views (ISO 128-44)", font=bold).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.auto_section = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tab, text="Automatic section through the middle of the front view",
+                        variable=self.auto_section, command=self.generate).grid(row=1, column=0, columnspan=3,
+                                                                                sticky="w", pady=2)
+        ttk.Label(tab, text="Arrows point").grid(row=2, column=0, sticky="w")
+        self.section_look = tk.StringVar(value="right")
+        ttk.Combobox(tab, textvariable=self.section_look, values=list(sheet.LOOKS), state="readonly",
+                     width=8).grid(row=2, column=1, sticky="w", padx=4)
+        ttk.Button(tab, text="Add section...", command=lambda: self.start_pick("section")).grid(
+            row=2, column=2, sticky="w")
+        ttk.Label(tab, text="Click a view where the cutting plane should pass; it snaps\n"
+                            "to hole centres and centre lines. The arrows show the way\nthe section is seen.",
+                  **grey).grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.section_list = ttk.Frame(tab)
+        self.section_list.grid(row=4, column=0, columnspan=3, sticky="we", pady=(4, 0))
+
+        ttk.Label(tab, text="Callouts", font=bold).grid(row=5, column=0, columnspan=3, sticky="w", pady=(16, 2))
+        ttk.Label(tab, text="Type").grid(row=6, column=0, sticky="w")
+        self.callout_type = tk.StringVar(value="Leader note")
+        box = ttk.Combobox(tab, textvariable=self.callout_type, values=list(CALLOUTS), state="readonly", width=14)
+        box.grid(row=6, column=1, columnspan=2, sticky="w", padx=4, pady=2)
+        box.bind("<<ComboboxSelected>>", lambda e: self.callout_hint.config(
+            text=CALLOUT_HINTS[CALLOUTS[self.callout_type.get()]]))
+        ttk.Label(tab, text="Text").grid(row=7, column=0, sticky="w")
+        self.callout_text = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.callout_text, width=34).grid(row=7, column=1, columnspan=2, sticky="we",
+                                                                      padx=4, pady=2)
+        ttk.Label(tab, text="Dimension").grid(row=8, column=0, sticky="w")
+        self.dim_direction = tk.StringVar(value="auto")
+        ttk.Combobox(tab, textvariable=self.dim_direction, values=list(edit.DIRECTIONS), state="readonly",
+                     width=10).grid(row=8, column=1, sticky="w", padx=4, pady=2)
+        ttk.Button(tab, text="Add callout...", command=lambda: self.start_pick("callout")).grid(
+            row=8, column=2, sticky="w")
+        self.callout_hint = ttk.Label(tab, text=CALLOUT_HINTS["note"], **grey)
+        self.callout_hint.grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.callout_list = ttk.Frame(tab)
+        self.callout_list.grid(row=10, column=0, columnspan=3, sticky="we", pady=(4, 0))
+
+        ttk.Label(tab, text="Move items", font=bold).grid(row=11, column=0, columnspan=3, sticky="w", pady=(16, 2))
+        ttk.Button(tab, text="Move...", command=lambda: self.start_pick("move")).grid(row=12, column=0, sticky="w")
+        ttk.Label(tab, text="Click a section, extra, detail or isometric view, the hole\n"
+                            "table, a hole tag, a datum letter or a callout, then click\n"
+                            "where it should go. The front, top and side views stay\n"
+                            "in projection; the rest is placed around what you move.",
+                  **grey).grid(row=13, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.move_list = ttk.Frame(tab)
+        self.move_list.grid(row=14, column=0, columnspan=3, sticky="we", pady=(4, 0))
+        tab.columnconfigure(2, weight=1)
+
+    def fill_edits(self):
+        """The sections, callouts and moved items, each with a button to take it back."""
+        for frame in (self.section_list, self.callout_list, self.move_list):
+            for child in frame.winfo_children():
+                child.destroy()
+        items = (self.info or {}).get("items", {})
+
+        def row(frame, i, text, button, command):
+            ttk.Label(frame, text=text, wraplength=330).grid(row=i, column=0, sticky="w")
+            ttk.Button(frame, text=button, command=command).grid(row=i, column=1, sticky="w", padx=6)
+
+        for i, s in enumerate(self.cfg.get("sections") or []):
+            row(self.section_list, i, f"{s.get('letter')}–{s.get('letter')}: {s.get('view')} view, arrows point "
+                                      f"{s.get('look')}", "Remove", lambda k=i: self.remove_section(k))
+        for i, c in enumerate(self.cfg.get("callouts") or []):
+            label = items.get(f"callout {i}", {}).get("label") or f"{c.get('type')}: {c.get('text') or ''}"
+            row(self.callout_list, i, f"{i + 1}. {label}  ({c.get('view')})", "Remove",
+                lambda k=i: self.remove_callout(k))
+        for i, key in enumerate(self.cfg.get("moves") or {}):
+            row(self.move_list, i, f"moved: {items.get(key, {}).get('label', key)}", "Reset",
+                lambda k=key: self.reset_move(k))
+
+    def remove_section(self, index):
+        """Take a section out, with the callouts and moves on it."""
+        key = f"section {self.cfg['sections'].pop(index).get('letter')}"
+        self.cfg["callouts"] = [c for c in self.cfg.get("callouts") or [] if c.get("view") != key]
+        (self.cfg.get("moves") or {}).pop(key, None)
+        marks = (self.cfg.get("surfaces") or {}).get("marks") or []
+        marks[:] = [m for m in marks if m.get("view") != key]
+        self.fill_edits()
+        self.generate()
+
+    def remove_callout(self, index):
+        del self.cfg["callouts"][index]
+        self.fill_edits()
+        self.generate()
+
+    def reset_move(self, key):
+        del self.cfg["moves"][key]
+        self.fill_edits()
+        self.generate()
+
     # ------------------------------------------------------------ picking on the preview
 
     def start_pick(self, what):
@@ -265,12 +373,26 @@ class App:
             self.set_status("Generate the drawing first.")
             return
         self.picking = {"what": what}
+        message = {"mark": "Click the surface in a view...",
+                   "A": "Click datum A's flat face in a view (its line, or inside it)...",
+                   "B": "Click the hole or port that is datum B...",
+                   "C": "Click the hole or port that is datum C...",
+                   "section": "Click the view where the cutting plane should pass...",
+                   "move": "Click the item to move..."}.get(what)
+        if what == "callout":
+            kind = CALLOUTS[self.callout_type.get()]
+            if kind in ("note", "balloon") and not self.callout_text.get().strip():
+                self.picking = None
+                self.set_status("Type the callout's text first.")
+                return
+            self.picking["kind"] = kind
+            message = {"note": "Click the part where the leader should point...",
+                       "hole": "Click the hole or port...",
+                       "dimension": "Click the first point (a hole centre, corner or line)...",
+                       "balloon": "Click the part where the balloon should point..."}[kind]
         self.preview.on_click = self.on_pick
         self.preview.config(cursor="crosshair")
-        self.set_status({"mark": "Click the surface in a view...",
-                         "A": "Click datum A's flat face in a view (its line, or inside it)...",
-                         "B": "Click the hole or port that is datum B...",
-                         "C": "Click the hole or port that is datum C..."}[what] + "   (Esc cancels)")
+        self.set_status(message + "   (Esc cancels)")
         self.root.bind("<Escape>", lambda e: self.end_pick("Picking cancelled."))
 
     def end_pick(self, message=None):
@@ -281,31 +403,13 @@ class App:
         if message:
             self.set_status(message)
 
-    def place_at(self, x, y, details=True):
-        """(name, place) of the view under a paper point; details first (they are enlargements)."""
-        hits = [(name, p) for name, p in self.info["places"].items()
-                if p["rect"][0] - 2 <= x <= p["rect"][2] + 2 and p["rect"][1] - 2 <= y <= p["rect"][3] + 2
-                and (details or "parent" not in p)]
-        hits.sort(key=lambda h: ("parent" not in h[1], (h[1]["rect"][2] - h[1]["rect"][0]) *
-                                 (h[1]["rect"][3] - h[1]["rect"][1])))
-        return hits[0] if hits else (None, None)
-
-    @staticmethod
-    def _to_view(place, x, y):
-        return (x - place["origin"][0]) / place["scale"], (y - place["origin"][1]) / place["scale"]
-
-    @staticmethod
-    def _to_paper(place, point):
-        d, up = place["frame"]
-        right = [up[1] * d[2] - up[2] * d[1], up[2] * d[0] - up[0] * d[2], up[0] * d[1] - up[1] * d[0]]
-        vx = sum(a * b for a, b in zip(point, right))
-        vy = sum(a * b for a, b in zip(point, up))
-        return place["origin"][0] + vx * place["scale"], place["origin"][1] + vy * place["scale"]
-
     def on_pick(self, fx, fy):
         w, h = sheet.SHEETS[self.info["sheet"]]
         x, y = fx * w, (1 - fy) * h  # paper mm
         p = self.picking
+        if p["what"] in ("section", "callout", "move"):
+            getattr(self, "_pick_" + p["what"])(x, y)
+            return
         if p["what"] == "mark" and "point" in p:  # second click: where the symbol goes
             tx, ty = p["tip"]
             self.cfg.setdefault("surfaces", {}).setdefault("marks", []).append(
@@ -315,24 +419,22 @@ class App:
             self.fill_marks()
             self.generate()
             return
-        name, place = self.place_at(x, y, details=p["what"] in ("B", "C"))
-        if place is None:
-            self.set_status("That is not on a view: click inside a view (Esc cancels).")
-            return
         if p["what"] in ("B", "C"):
-            openings = [o for o in self.info["holes"] + self.info["ports"] if o["view"] == place["label"]]
-            near = sorted(((x - px) ** 2 + (y - py) ** 2, o) for o in openings
-                          for px, py in [self._to_paper(place, o["point"])])
-            if not near or near[0][0] > 8 ** 2:
-                self.set_status("No hole or port there: click closer to one (Esc cancels).")
+            got, error = edit.opening_at(self.info, x, y)
+            if error:
+                self.set_status(error + "   (Esc cancels)")
                 return
-            opening = near[0][1]
+            opening = got[1]
             self.cfg.setdefault("datum", {})[p["what"]] = [float(v) for v in opening["point"]]
             self.end_pick(f"Datum {p['what']}: {opening['tag']}")
             self.fill_marks()
             self.generate()
             return
-        hit = geometry.pick(self.shape, place["frame"], self._to_view(place, x, y), 0.8 / place["scale"],
+        name, place = edit.place_at(self.info, x, y, details=False)
+        if place is None:
+            self.set_status("That is not on a view: click inside a view (Esc cancels).")
+            return
+        hit = geometry.pick(self.shape, place["frame"], edit.view_xy(place, x, y), 0.8 / place["scale"],
                             cut=place.get("cut"))
         if hit is None:
             self.set_status("No surface there: click on the part (Esc cancels).")
@@ -344,8 +446,93 @@ class App:
             self.fill_marks()
             self.generate()
             return
-        p.update(point=point, edge=bool(hit[1]), view=name, tip=self._to_paper(place, point))
+        p.update(point=point, edge=bool(hit[1]), view=name, tip=[float(v) for v in edit.paper_xy(place, point)])
         self.set_status("Now click where the symbol should go (Esc cancels).")
+
+    def _added(self, message):
+        """After a pick that changed the settings: stop picking, list it, regenerate."""
+        self.end_pick(message)
+        self.fill_edits()
+        self.generate()
+
+    def _pick_section(self, x, y):
+        entry, error = edit.section(self.info, self.cfg, x, y, self.section_look.get())
+        if error:
+            self.set_status(error + "   (Esc cancels)")
+            return
+        self.cfg.setdefault("sections", []).append(entry)
+        self._added(f"Section {entry['letter']}–{entry['letter']} added.")
+
+    def _pick_callout(self, x, y):
+        """Notes and balloons: the point on the part, then the text; holes: the hole, then the
+        text; dimensions: two points, then the dimension line."""
+        p, text = self.picking, self.callout_text.get().strip()
+        if p["kind"] == "dimension" and "p2" not in p:
+            got, error = edit.dimension_point(self.info, x, y, p.get("view"))
+            if error:
+                self.set_status(error + "   (Esc cancels)")
+                return
+            if "p1" not in p:
+                p["view"], p["p1"] = got
+                self.set_status("Click the second point (in the same view)...   (Esc cancels)")
+            else:
+                p["p2"] = got[1]
+                self.set_status("Click where the dimension line should go...   (Esc cancels)")
+            return
+        if p["kind"] == "dimension":
+            entry, error = edit.dimension(self.info, p["view"], p["p1"], p["p2"], x, y, self.dim_direction.get(),
+                                          text)
+            if error:
+                self.end_pick(error)
+                return
+        elif "anchor" not in p:
+            if p["kind"] == "hole":
+                got, error = edit.opening_at(self.info, x, y)
+                if not error:
+                    (view, opening), edge = got, True
+                    point = opening["point"]
+            else:
+                got, error = edit.leader_tip(self.shape, self.info, x, y)
+                if not error:
+                    view, point, edge = got
+            if error:
+                self.set_status(error + "   (Esc cancels)")
+                return
+            p.update(view=view, point=point, edge=edge, anchor=edit.paper_xy(self.info["places"][view], point))
+            self.set_status("Now click where the " + ("balloon" if p["kind"] == "balloon" else "text") +
+                            " should go...   (Esc cancels)")
+            return
+        else:
+            entry = edit.callout(p["kind"], p["view"], p["point"], p["anchor"], x, y, text, p["edge"])
+        self.cfg.setdefault("callouts", []).append(entry)
+        self._added("Callout added.")
+
+    def _pick_move(self, x, y):
+        """The item, then where it goes; datum A also takes the spot on its face."""
+        p = self.picking
+        if "key" not in p:
+            key = edit.item_at(self.info, x, y)
+            if key is None:
+                self.set_status("Nothing to move there (the front, top and side views stay in projection)."
+                                "   (Esc cancels)")
+                return
+            p["key"] = key
+            label = self.info["items"][key]["label"]
+            self.set_status(("Click datum A's face where a view shows it as a line: the triangle goes there..."
+                             if key == "datum A" else f"Click where the {label} should go...") + "   (Esc cancels)")
+            return
+        if p["key"] == "datum A" and "spot" not in p:
+            p["spot"], error = edit.datum_a_spot(self.shape, self.info, x, y)
+            if error:
+                self.set_status(error + "   (Esc cancels)")
+                return
+            self.set_status("Now click where the letter A should go...   (Esc cancels)")
+            return
+        if p["key"] == "datum A":
+            edit.move_datum_a(self.cfg, self.info, *p["spot"], x, y)
+        else:
+            edit.move(self.cfg, self.info, p["key"], x, y)
+        self._added(f"Moved the {self.info['items'][p['key']]['label']}.")
 
     def fill_form(self):
         c = self.cfg
@@ -360,6 +547,7 @@ class App:
             var.set(str(values.get(key, "") or ""))
         self.reference.set(bool(c["reference_envelope"]))
         self.surface_default.set((c.get("surfaces") or {}).get("default", "any"))
+        self.auto_section.set(str(c.get("section", "auto")).lower() not in ("none", "false", "off"))
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", "\n".join(str(n) for n in c["notes"] or []))
 
@@ -374,6 +562,7 @@ class App:
         c["reference_envelope"] = self.reference.get()
         c.setdefault("datum", {}).update(origin=v["datum_origin"] or "auto", confirm=False)  # keeps picked A/B/C
         c.setdefault("surfaces", {"marks": []})["default"] = self.surface_default.get() or "any"
+        c["section"] = "auto" if self.auto_section.get() else "none"
         for key, _ in TITLE_FIELDS:
             c["title_block"][key] = v[key]
         c["notes"] = [n.strip() for n in self.notes.get("1.0", "end").splitlines() if n.strip()]
@@ -449,6 +638,7 @@ class App:
         self.fill_form()
         self.fill_holes([])
         self.fill_marks()
+        self.fill_edits()
         self.step, self.shape, self.doc = path, None, None
         note = f"   (settings from {yaml_path.name})" if yaml_path.exists() else ""
         self.file_label.config(text=path.name + note)
@@ -477,16 +667,18 @@ class App:
         self.cfg["holes"] = copy.deepcopy(self.built_cfg["holes"])
         self.fill_holes(i["hole_types"])
         self.fill_marks()
+        self.fill_edits()
         msg = (f"{i['sheet']}, scale {sheet.fmt_scale(i['scale'])}, front view {i['front']}, "
                f"up {i['up']}, {len(i['holes'])} holes")
         if i["ports"]:
             msg += f", {len(i['ports'])} waveguide port(s)"
-        if i["section"]:
-            msg += f", section {i['section']}"
+        if i["sections"]:
+            msg += ", section " + ", ".join(x["label"] for x in i["sections"])
         if i["extra_views"]:
             msg += ", extra views " + ", ".join(i["extra_views"])
-        if i["warnings"]:
-            msg += "   |   " + "; ".join(w for w in i["warnings"] if "surface mark" in w)
+        shown = [w for w in i["warnings"] if any(k in w for k in ("surface mark", "section", "callout"))]
+        if shown:
+            msg += "   |   " + "; ".join(shown)
         pending = sum(1 for t in i["hole_types"] if t["spec"].get("confirm"))
         if pending:
             msg += f"   |   {pending} hole type(s) to confirm in the Holes tab"

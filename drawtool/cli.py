@@ -51,8 +51,10 @@ def draw(step, yaml_path, out):
     print(f"wrote {stem}.dxf/.pdf/.png to {out}  ({info['sheet']}, scale {sheet.fmt_scale(info['scale'])}, "
           f"front {info['front']}, up {info['up']}, {len(info['holes'])} holes, "
           f"{len(info['ports'])} waveguide ports)")
-    if info["section"]:
-        print(f"section {info['section']}")
+    if info["sections"]:
+        print("section " + ", ".join(x["label"] for x in info["sections"]))
+    if cfg.get("callouts"):
+        print(f"callouts: {sum(k.startswith('callout ') for k in info['items'])} of {len(cfg['callouts'])} drawn")
     if info["datums"]:
         d = info["datums"]
         print("datums: A = face " + str(d["A"]["centre"]) +

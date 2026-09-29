@@ -35,7 +35,10 @@ def defaults(step_path):
         "views": {"front": "auto", "up": "auto", "iso": "auto", "confirm": False},
         "datum": {"A": "auto", "B": "auto", "C": None, "origin": "auto", "confirm": False},
         "section": "auto",
+        "sections": [],
         "surfaces": {"default": "any", "marks": []},
+        "callouts": [],
+        "moves": {},
         "holes": {},
         "notes": [],
     }
@@ -119,10 +122,21 @@ datum:                         # ISO 5459 datums for the hole tables and positio
   confirm: {datum_confirm}
 
 section: auto                  # auto (through the middle, seen from the left) | none
+sections: []                   # sections added in the app, e.g.
+#  - {{letter: U, view: front, point: [0, 0, 20], look: down}}   # plane through point, arrows point look
 
 surfaces:                      # ISO 21920-1 surface texture
   default: any                 # symbol in the title block: any | machined | as built
   marks: []                    # surfaces marked in the app: finish, ra, view, point, at
+
+callouts: []                   # added in the app; point(s) on the part, at = text offset on paper (mm)
+#  - {{type: note, view: front, point: [x, y, z], edge: true, at: [-15, 10], text: "Engrave P/N here"}}
+#  - {{type: hole, view: top, point: [x, y, z], at: [12, 8], text: ""}}          # empty = hole table size
+#  - {{type: dimension, view: front, points: [[x, y, z], [x, y, z]], direction: horizontal, at: [0, 12],
+#     text: ""}}                                                                 # "<> ±0.1": <> = value
+#  - {{type: balloon, view: front, point: [x, y, z], edge: false, at: [10, 10], text: "Remove supports"}}
+moves: {{}}                      # items moved in the app: views and the hole table by centre on the sheet,
+                               # tags and datum letters by offset from their feature
 
 {holes}
 notes: []                      # your own notes, after the standard ones, e.g.

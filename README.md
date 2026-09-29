@@ -16,7 +16,10 @@ Download **DrawTool-windows** from the latest successful
    tolerances per hole type on the **Holes** tab, then **Regenerate**.
 3. On the **Surfaces & datums** tab, mark surfaces and pick datums on the
    preview (see [Surfaces and datums](#surfaces-and-datums)).
-4. **Export DXF + PDF...** writes `<part>.dxf`, `<part>.pdf` and `<part>.yaml`
+4. On the **Sections & callouts** tab, add your own sections, notes, hole
+   callouts, dimensions and balloons, and move what the tool placed (see
+   [Sections, callouts and moving items](#sections-callouts-and-moving-items)).
+5. **Export DXF + PDF...** writes `<part>.dxf`, `<part>.pdf` and `<part>.yaml`
    to a folder. The YAML holds your settings: keep it next to the STEP file and
    they are loaded automatically the next time you open that part.
 
@@ -145,7 +148,60 @@ In the app, the **Surfaces & datums** tab:
 Picks are saved in the YAML (`surfaces.marks`, `datum.A/B/C`) as model points,
 so they follow the part when views move or the scale changes.
 
-DXF layers: `VISIBLE`, `HIDDEN`, `CENTER`, `DIMS`, `TEXT`, `FRAME`, `HOLES`, `HATCH`, `SURFACES`. The DXF is
+## Sections, callouts and moving items
+
+The tool first draws the drawing it thinks best; on the **Sections & callouts**
+tab you then add to it and rearrange it, all by clicking on the preview (Esc
+cancels a pick). Each entry is listed with a Remove / Reset button.
+
+- *Section views* (ISO 128-44): choose which way the arrows point (right, left,
+  up, down: the direction the section is seen in), **Add section...** and click
+  the front, top or side view (or a whole extra view) where the cutting plane
+  should pass. The plane is square to that view; the click snaps to hole and
+  circle centres and to the view's centre lines. The section gets a letter not
+  used on the drawing yet (so no other letter changes), hatched cut faces, the
+  cutting line with thick ends, arrows and letters (plus the thin chain line
+  across the view when it is not on a centre line), and a place of its own: it
+  is never left out for lack of room, the scale or sheet adapts instead. Looking
+  right on the front view it can take the side view's place when that view
+  repeats the front view. *Automatic section* switches the tool's own section
+  on or off.
+- *Callouts* (layer `CALLOUTS`), leaders per ISO 128-22: an arrow when you
+  click on a line (an outline or a face seen edge-on), a dot when you click
+  inside a face.
+  - *Leader note*: type the text, click the part, then where the text goes; it
+    sits on a reference line running away from the leader.
+  - *Hole callout*: click a hole or port, then where the text goes. With no text
+    it reads like its hole table row (e.g. `8× Ø2.2 THRU`) and follows it when
+    you confirm a thread; the leader ends on the hole's outline.
+  - *Dimension*: click two points (hole and circle centres, corners and lines
+    snap), then where the dimension line goes: above or below the points gives a
+    horizontal dimension, beside them a vertical one (or choose horizontal,
+    vertical or aligned). No text shows the measured value; `<>` stands for it,
+    e.g. `<> ±0.05`.
+  - *Balloon*: type a note, click the part, then where the balloon goes. The
+    text is added to the NOTES and the balloon shows its number (balloons with
+    the same text share one note); type a number instead to point at an existing
+    note.
+- *Move items*: **Move...**, click an item, then where it should go: a section,
+  extra, detail or isometric view, or the hole table (their centre goes to the
+  click), a hole tag, a datum letter (B and C: the letter goes to the click, the
+  triangle on the outline in line with it; A: first click A's face where a view
+  shows it as a line, then where the letter goes) or one of your callouts (its
+  text or balloon). The front, top and side views stay in projection. Moved
+  items keep their size and scale and stay inside the frame; everything placed
+  automatically afterwards (the isometric view, tags, datums) finds room around
+  them. Text that ends up on other text, or outside the frame, is reported in
+  the status bar as a layout problem.
+
+In the YAML these are `sections` (letter, view, a model point on the plane,
+`look`), `callouts` (type, view, model point(s), `at` = text offset on the paper
+in mm, text) and `moves` (views and the hole table by their centre on the sheet,
+tags and datum letters by their offset from the feature), so they follow the
+part when the layout changes. A section or callout whose view is no longer on
+the drawing is left out with a warning.
+
+DXF layers: `VISIBLE`, `HIDDEN`, `CENTER`, `DIMS`, `TEXT`, `FRAME`, `HOLES`, `HATCH`, `SURFACES`, `CALLOUTS`. The DXF is
 drawn at sheet size in mm (views scaled); dimensions carry DIMLFAC so they read
 true part size. The PDF and PNG are rendered from the DXF with ezdxf.
 

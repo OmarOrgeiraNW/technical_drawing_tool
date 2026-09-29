@@ -45,7 +45,9 @@ LAYERS = {  # name: (linetype, lineweight in 1/100 mm)
     "HOLES": ("Continuous", 25),  # hole tags, leaders, table origin, detail letters
     "HATCH": ("Continuous", 18),  # section hatching
     "SURFACES": ("Continuous", 25),  # surface texture marks placed in the app
+    "CALLOUTS": ("Continuous", 25),  # notes, hole callouts, dimensions and balloons added in the app
 }
+LOOKS = {"right": (1, 0), "left": (-1, 0), "up": (0, 1), "down": (0, -1)}  # section arrows on the paper
 TAG_H = 2.5  # lettering height for hole tags and the hole table
 ROW = 5.0  # hole table row height
 CROWDED = 5.0  # hole centres closer than this on paper get a detail view
@@ -113,52 +115,58 @@ def place(ext, sheet, s, notes_h, align="centre"):
         if all(_inside(z, inner) and not _overlap(z, tb, PAD) for z in zones):
             return {"sheet": sheet, "size": (w, h), "scale": s, "area": area,
                     "title_block": tb, "rects": rects, "zones": zones, "origins": origins,
-                    "aux": {}, "letters": iter(DETAIL_LETTERS)}
+                    "aux": {}, "sections": {}}
     return None
 
 
 AUTO_SHEETS = ("A4", "A3", "A2")  # "auto" chooses among these; A1 and A0 on request
 
 
-def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=(), section=None, slot=False):
+def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=(), sections=(), slot=False):
     """Sheet and scale, and room for everything around the main views.
 
     auto: A4 if the part fits at 1:1 or larger, otherwise the best scale on A3;
-    A2 only when A3 has no room for the section view at the drawing scale.
+    A2 only when A3 has no room for the section views at the drawing scale.
     A chosen sheet adapts to its space instead: the largest scale that fits,
-    hole tables side by side when one column is too tall, the section reduced,
-    and the section left out (lay["section_dropped"]) only when the main views
-    would otherwise shrink more than one ISO scale step.
+    hole tables side by side when one column is too tall, sections reduced,
+    and the automatic section left out (lay["section_dropped"]) only when the
+    main views would otherwise shrink more than one ISO scale step. Sections
+    added in the app are never left out.
 
     `block` is the hole tables' {"width", "heights"}, `needs` the extra views for
-    holes and `section` the extents of the section view. With `slot` the section
-    first tries the side view's place (right of the front view).
+    holes and `sections` the section views ({"key", "ext", "auto", "slot"}, the
+    automatic one first). With `slot` the first section marked "slot" (seen from
+    the left) first tries the side view's place, right of the front view.
     """
     if sheet != "auto" and sheet not in SHEETS:
         raise ValueError(f"unknown sheet size '{sheet}': use auto, {', '.join(SHEETS)}")
     sheets = list(AUTO_SHEETS) if sheet == "auto" else [sheet]
     scales = SCALES if scale == "auto" else [parse_scale(scale)]
+    auto = bool(sections) and sections[0]["auto"]
 
-    def attempt(name, s, keep_section):
-        variants = [({**ext, "section": section}, None)] if keep_section and section and slot else []
-        variants.append((ext, _size(section) if keep_section and section else None))
-        for views, free_section in variants:
+    def attempt(name, s, keep_auto):
+        wanted = [x for x in sections if keep_auto or not x["auto"]]
+        first = next((x for x in wanted if x["slot"]), None) if slot else None
+        for in_slot in ([first] if first else []) + [None]:
+            views = {**ext, "section": in_slot["ext"]} if in_slot else ext
             for align in ("centre", "left"):
                 for columns in (1, 2, 3) if block else (1,):
                     lay = place(views, name, s, notes_h, align)
                     if lay and (not block or _reserve(lay, block, columns)) and \
-                            (not free_section or _reserve_section(lay, free_section)) and _reserve_aux(lay, needs):
-                        lay["section_dropped"] = bool(section) and not keep_section
+                            all(_reserve_section(lay, x["key"], _size(x["ext"])) for x in wanted if x is not in_slot) \
+                            and _reserve_aux(lay, needs):
+                        lay["section_dropped"] = auto and not keep_auto
+                        lay["slot"] = in_slot["key"] if in_slot else None
                         return lay
         return None
 
     def best(name):
         natural = [s for s in scales if place(ext, name, s, notes_h)]  # the main views alone
-        floor = natural[min(1, len(natural) - 1)] if natural and section else 0
+        floor = natural[min(1, len(natural) - 1)] if natural and auto else 0
         for s in scales:
             if s >= floor and (lay := attempt(name, s, True)):
                 return lay
-        if section:  # no room for the section: leave it out rather than shrink everything further
+        if auto:  # no room for the automatic section: leave it out rather than shrink everything further
             return next((lay for s in scales if (lay := attempt(name, s, False))), None)
         return None
 
@@ -167,8 +175,7 @@ def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=()
         lay = best(name)
         if lay is None:
             continue
-        full = not lay["section_dropped"] and ("section" in lay["rects"] or
-                                               lay.get("section", {}).get("scale", lay["scale"]) == lay["scale"])
+        full = not lay["section_dropped"] and all(v["scale"] == lay["scale"] for v in lay["sections"].values())
         if scale != "auto" or sheet != "auto" or (full and (name != "A4" or lay["scale"] >= 1)):
             return lay
         if name != "A4":
@@ -176,7 +183,7 @@ def choose_layout(ext, notes_h, sheet="auto", scale="auto", block=None, needs=()
     if fallback:
         return fallback
     where = sheet if sheet != "auto" else AUTO_SHEETS[-1]
-    raise ValueError(f"the views, hole tables and extra views do not fit on {where}"
+    raise ValueError(f"the views, sections, hole tables and extra views do not fit on {where}"
                      + (f" at {scale}; choose a smaller scale or a larger sheet" if scale != "auto"
                         else " at any scale; choose a larger sheet"))
 
@@ -230,16 +237,17 @@ def _reserve(lay, block, columns=1):
     return True
 
 
-def _reserve_section(lay, size):
-    """Room for the section view: the drawing scale if it fits, else down to a fifth of it."""
+def _reserve_section(lay, key, size):
+    """Room for a section view: the drawing scale if it fits, else down to a fifth of it."""
     s = lay["scale"]
     for c in (c for c in sorted(SCALES, reverse=True) if s / 5 <= c <= s):
         w, h = size[0] * c + 2, size[1] * c + 2
         free, fit = free_rect(lay, (w, h + 10), label=0)
         if free and fit >= 1:
             x0, y1 = free[0] + PAD, free[3] - PAD
-            lay["zones"].append((x0, y1 - h - 10, x0 + w, y1))
-            lay["section"] = {"scale": c, "paper": np.array([x0 + w / 2, y1 - 10 - h / 2])}
+            box = (x0, y1 - h - 10, x0 + w, y1)  # view plus its label
+            lay["zones"].append(box)
+            lay["sections"][key] = {"scale": c, "paper": np.array([x0 + w / 2, y1 - 10 - h / 2]), "box": box}
             return True
     return False
 
@@ -264,13 +272,59 @@ def _reserve_aux(lay, needs):
             cx, cy = x0 + w / 2, y1 - 10 - h / 2
             lay["zones"].append(box)
             lay["aux"][need["view"]] = {"letter": need["letter"], "scale": c, "partial": need["partial"],
-                                        "paper": np.array([cx, cy]),
+                                        "paper": np.array([cx, cy]), "box": box,
                                         "origin": np.array([cx, cy]) - need["centre"] * c}
             break
         else:
             return False
-    lay["letters"] = iter(DETAIL_LETTERS[len(needs):])
     return True
+
+
+def _shifted(lay, box, centre, at):
+    """`box` moved so that `centre` lands on `at`, kept inside the frame; its keep-out
+    zone moves with it. Returns the new box and the shift."""
+    x0, y0, x1, y1 = lay["area"]
+    delta = np.asarray(at, float) - np.asarray(centre, float)
+    delta[0] = np.clip(delta[0], x0 + PAD - box[0], max(x0 + PAD - box[0], x1 - PAD - box[2]))
+    delta[1] = np.clip(delta[1], y0 + PAD - box[1], max(y0 + PAD - box[1], y1 - PAD - box[3]))
+    new = (box[0] + delta[0], box[1] + delta[1], box[2] + delta[0], box[3] + delta[1])
+    if box in lay["zones"]:
+        lay["zones"][lay["zones"].index(box)] = new
+    return new, delta
+
+
+def _xy(value):
+    """A 2D point or offset from the YAML, or None."""
+    return np.array(value, float) if isinstance(value, (list, tuple)) and len(value) == 2 else None
+
+
+def move_blocks(lay, moves, sections):
+    """Sections, extra views and the hole tables where they were moved in the app: each
+    keeps its size and scale, its centre goes to the chosen point (inside the frame)."""
+    for sec in sections:
+        at = _xy(moves.get(sec["key"]))
+        if at is None:
+            continue
+        if lay["slot"] == sec["key"]:  # out of the side view's place, which stays free
+            r = lay["rects"].pop("section")
+            lay["origins"].pop("section")
+            lay["slot"] = None
+            box = (r[0], r[1], r[2], r[3] + 10)
+            lay["zones"].append(box)
+            lay["sections"][sec["key"]] = {"scale": lay["scale"], "box": box,
+                                           "paper": np.array([(r[0] + r[2]) / 2, (r[1] + r[3]) / 2])}
+        m = lay["sections"][sec["key"]]
+        m["box"], shift = _shifted(lay, m["box"], m["paper"], at)
+        m["paper"] = m["paper"] + shift
+    for view, a in lay["aux"].items():
+        at = _xy(moves.get(view))
+        if at is not None:
+            a["box"], shift = _shifted(lay, a["box"], a["paper"], at)
+            a["paper"], a["origin"] = a["paper"] + shift, a["origin"] + shift
+    at = _xy(moves.get("hole table"))
+    if at is not None and "table" in lay:
+        t = lay["table"]
+        lay["table"], _ = _shifted(lay, t, ((t[0] + t[2]) / 2, (t[1] + t[3]) / 2), at)
 
 
 def free_rect(lay, size, label=H + 4):
@@ -393,6 +447,7 @@ def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2, pi
 
     Hidden features get none (hidden lines are not drawn). Arms that would lie
     on the view's symmetry lines are left out; tiny circles get continuous lines.
+    Returns the marked centres in view coordinates (the app snaps to them).
     """
     d, y = frame
     x = np.cross(y, d)
@@ -443,6 +498,7 @@ def centre_marks(msp, circles, frame, lines, ext, origin, s, sym, overhang=2, pi
         p1 = to_paper(base + min(ts) * a2, origin, s) - a2 * overhang
         p2 = to_paper(base + max(ts) * a2, origin, s) + a2 * overhang
         msp.add_line(tuple(p1), tuple(p2), dxfattribs={"layer": "CENTER", "ltscale": 0.25})
+    return list(marks)
 
 
 AUX_VIEWS = ("left", "bottom", "right", "rear")  # used only for holes no main view shows
@@ -513,7 +569,7 @@ def plan_holes(found, frames, ortho, cfg):
     return rows, types, warnings
 
 
-def aux_needs(rows, ortho, ext):
+def aux_needs(rows, ortho, ext, letters=DETAIL_LETTERS):
     """Extra views the holes need: the whole view, or a partial circle for a small area."""
     needs = []
     for view in AUX_VIEWS:
@@ -525,7 +581,7 @@ def aux_needs(rows, ortho, ext):
         lo, hi = pts.min(axis=0) - rmax, pts.max(axis=0) + rmax
         e = ext[view]
         gap = min((np.hypot(*(a - b)) for a, b in itertools.combinations(pts, 2)), default=np.inf)
-        need = {"view": view, "letter": DETAIL_LETTERS[len(needs)], "gap": max(gap, 1e-3)}
+        need = {"view": view, "letter": letters[len(needs)], "gap": max(gap, 1e-3)}
         if hi[0] - lo[0] > 0.5 * _size(e)[0] or hi[1] - lo[1] > 0.5 * _size(e)[1]:
             need.update(partial=None, size=_size(e), centre=np.array([(e[0] + e[2]) / 2, (e[1] + e[3]) / 2]))
         else:
@@ -648,11 +704,11 @@ HEADER = ("TAG", "X", "Y", "SIZE")
 SIZE_W = 45  # mm; longer hole descriptions wrap inside their cell
 
 
-def _wrap(description, width):
+def _wrap(description, width, h=TAG_H):
     """Split a hole description at its commas into lines no wider than `width`."""
     lines = []
     for part in description.split(", "):
-        if lines and text_width(f"{lines[-1]}, {part}", TAG_H) <= width:
+        if lines and text_width(f"{lines[-1]}, {part}", h) <= width:
             lines[-1] = f"{lines[-1]}, {part}"
         else:
             if lines:
@@ -856,8 +912,9 @@ def _circles_in(circles, frame, centre, R):
 
 
 def draw_aux(msp, lay, lines, frames, ext, sym, circles):
-    """Extra views for holes (ISO 128-3 reference-arrow views): whole or partial, with letter."""
-    rects = {}
+    """Extra views for holes (ISO 128-3 reference-arrow views): whole or partial, with letter.
+    Returns their paper rectangles and centre marks."""
+    rects, centres = {}, {}
     for view, a in lay["aux"].items():
         o, c, e = a["origin"], a["scale"], ext[view]
         if a["partial"]:
@@ -874,10 +931,10 @@ def draw_aux(msp, lay, lines, frames, ext, sym, circles):
             rects[view] = (*to_paper(e[:2], o, c), *to_paper(e[2:], o, c))
         draw_view(msp, shown, o, c)
         if shown:
-            centre_marks(msp, inside, frames[view], shown, e, o, c, sym[view], pixels=pixels)
+            centres[view] = centre_marks(msp, inside, frames[view], shown, e, o, c, sym[view], pixels=pixels)
         label = a["letter"] if c == lay["scale"] else f"{a['letter']} ({fmt_scale(c)})"
         text(msp, label, a["paper"][0], rects[view][3] + 3, h=5, align="BOTTOM_CENTER")
-    return rects
+    return rects, centres
 
 
 def plan_details(rows, lay, views):
@@ -937,7 +994,9 @@ def plan_details(rows, lay, views):
 
 
 def draw_details(msp, details, lines, frames, ext, sym, circles, lay):
-    """Circle and letter on the source view; the enlarged, clipped view with its label."""
+    """Circle and letter on the source view; the enlarged, clipped view with its label.
+    Returns the centre marks per detail."""
+    centres = {}
     for d in details:
         view, c, R, sc, o = d["view"], d["centre"], d["R"], d["scale"], d["origin"]
         vo, vs = view_place(lay, view)
@@ -951,24 +1010,66 @@ def draw_details(msp, details, lines, frames, ext, sym, circles, lay):
              align="BOTTOM_CENTER")
         _centre_lines_in_circle(msp, ext[view], sym[view], c, R, o, sc)
         if clipped:
-            centre_marks(msp, _circles_in(circles, frames[view], c, R), frames[view], clipped, ext[view],
-                         o, sc, sym[view], pixels=150)
+            centres[f"detail {d['letter']}"] = centre_marks(msp, _circles_in(circles, frames[view], c, R),
+                                                            frames[view], clipped, ext[view], o, sc, sym[view],
+                                                            pixels=150)
+    return centres
 
 
-def plan_section(shape, frames, ext, cfg):
-    """Section through the middle of the front view, seen from the left (ISO 128-44).
+def section_letters(entries):
+    """The sections added in the app, each with its letter (one is given where the YAML has
+    none), and the letters left for the extra views, the automatic section and details."""
+    sections = [dict(e) for e in entries or [] if isinstance(e, dict)]
+    taken = {str(e["letter"]) for e in sections if e.get("letter")}
+    for e in sections:
+        if not e.get("letter"):
+            e["letter"] = next(letter for letter in reversed(DETAIL_LETTERS) if letter not in taken)
+            taken.add(e["letter"])
+    return sections, [letter for letter in DETAIL_LETTERS if letter not in taken]
 
-    Only kept when it shows something the outside views do not: more than one
-    cut face, or a cut face with holes in it.
+
+def _section(shape, frames, view, q, look):
+    """A section whose cutting plane passes through point q of `view`, square to that view and
+    across the arrows, which point `look` on the paper: the direction the section is seen in."""
+    d, y = frames[view]
+    u = LOOKS[look]
+    k = 0 if u[0] else 1
+    n = u[0] * np.cross(y, d) + u[1] * y
+    # seen along n: from the left or right as a side view, from above or below as a top view
+    frame = (-n, y) if k == 0 else (-n, (n @ y) * d)
+    lines, loops = geometry.section_view(shape, frame, n, q[k] * u[k])
+    return {"view": view, "look": u, "pos": float(q[k]), "frame": frame, "normal": n, "offset": float(q[k] * u[k]),
+            "lines": lines, "loops": loops, "ext": geometry.extents(lines) if lines else None,
+            "slot": view == "front" and look == "right"}  # seen from the left: may take the side view's place
+
+
+def plan_sections(shape, frames, ext, cfg, entries, views, warnings):
+    """Section views (ISO 128-44): the automatic one first, through the middle of the front
+    view and seen from the left, then those added in the app (`entries`), each cut on one
+    of `views`.
+
+    The automatic one is only kept when it shows something the outside views do
+    not: more than one cut face, or a cut face with holes in it.
     """
-    if str(cfg.get("section", "auto")).lower() in ("none", "false", "off"):
-        return None
-    x = np.cross(frames["front"][1], frames["front"][0])
-    at = (ext["front"][0] + ext["front"][2]) / 2
-    lines, loops = geometry.section_view(shape, frames["left"], x, at)
-    if not loops or (len(loops) == 1 and len(loops[0]) == 1):
-        return None
-    return {"lines": lines, "loops": loops, "at": at, "ext": geometry.extents(lines)}
+    out = []
+    if str(cfg.get("section", "auto")).lower() not in ("none", "false", "off"):
+        sec = _section(shape, frames, "front", ((ext["front"][0] + ext["front"][2]) / 2, 0.0), "right")
+        loops = sec["loops"]
+        if loops and not (len(loops) == 1 and len(loops[0]) == 1):
+            out.append({**sec, "key": "section", "auto": True})
+    for e in entries:
+        name = f"{e['letter']}–{e['letter']}"
+        point, look = _pick(e.get("point")), str(e.get("look", "right"))
+        if e.get("view") not in views or point is None or look not in LOOKS:
+            warnings.append(f"section {name} is left out: its view ({e.get('view')}) is not on the drawing")
+            continue
+        d, y = frames[e["view"]]
+        sec = _section(shape, frames, e["view"], (point @ np.cross(y, d), point @ y), look)
+        if not sec["loops"]:
+            warnings.append(f"section {name} is left out: its cutting plane misses the part")
+            continue
+        out.append({**sec, "key": f"section {e['letter']}", "letter": e["letter"], "auto": False})
+    return out
 
 
 def _area(loop):
@@ -976,8 +1077,9 @@ def _area(loop):
     return 0.5 * (x @ np.roll(y, -1) - y @ np.roll(x, -1))
 
 
-def draw_section(msp, sec, lay, frames, circles, axis=False):
+def draw_section(msp, sec, lay, circles, axis=False):
     """The section view: outline, 45° hatching of the cut faces (ISO 128-50), centre lines, label.
+    Returns its paper rectangle and centre marks.
 
     `axis`: the part is symmetric about the vertical centre line of the front
     view and its side view repeats the front (a turned part): the section gets
@@ -997,40 +1099,69 @@ def draw_section(msp, sec, lay, frames, circles, axis=False):
     sym = geometry.symmetry(sec["lines"])
     sym = (sym[0] or axis, sym[1])
     draw_centre_lines(msp, e, o, c, sym)
-    centre_marks(msp, circles, frames["left"], sec["lines"], e, o, c, sym)
+    centres = centre_marks(msp, circles, sec["frame"], sec["lines"], e, o, c, sym)
     r = (*to_paper(e[:2], o, c), *to_paper(e[2:], o, c))
     label = f"{sec['letter']}–{sec['letter']}"
     text(msp, label if c == lay["scale"] else f"{label} ({fmt_scale(c)})", (r[0] + r[2]) / 2, r[3] + 3, h=5,
          align="BOTTOM_CENTER")
-    return r
+    return r, centres
 
 
-def cutting_plane(msp, lay, sec, details):
-    """ISO 128-44 cutting plane on the front view: thick ends beyond the outline
-    (and beyond detail circles on the line), arrows in the viewing direction and
-    the section letter."""
-    o, s = view_place(lay, "front")
-    r = lay["rects"]["front"]
-    x = sec["at"] * s + o[0]
-    top, bottom = r[3], r[1]
-    below = lay["rects"]["top"][3]  # the top view sits under the front view (first angle)
+def cutting_plane(msp, lay, sec, details, rects, ext, sym):
+    """ISO 128-44 cutting plane on the view it cuts: thick ends beyond the outline (and
+    beyond detail circles on the line, where no other view is in the way), arrows in
+    the viewing direction and the section letter. Off the view's centre lines the thin
+    chain line runs across the view as well, so the plane's position reads clearly."""
+    view = sec["view"]
+    o, s = view_place(lay, view)
+    r = rects[view]
+    u = np.array(sec["look"], float)
+    k = 0 if u[0] else 1  # the arrows run along paper x (k = 0) or y
+    j = 1 - k  # ... and the cutting line along the other axis
+    pos = sec["pos"] * s + o[k]
+    ends = [r[j], r[j + 2]]
+    others = [b for name, b in rects.items() if name != view]
+
+    def clear(e, sign):  # no other view between the outline and GAP beyond an end at e
+        strip = [0.0] * 4
+        strip[k], strip[k + 2] = pos - 0.5, pos + 0.5
+        strip[j], strip[j + 2] = (r[j + 2], e + GAP) if sign > 0 else (e - GAP, r[j])
+        return not any(_overlap(strip, b) for b in others)
+
     for d in details:
-        if d["view"] == "front":
-            (cx, cy), rr = to_paper(d["centre"], o, s), d["R"] * s
-            if abs(cx - x) < rr:
-                half = np.sqrt(rr * rr - (cx - x) ** 2)
-                top = max(top, cy + half)
-                if cy - half - GAP > below:  # room for the end, arrow and letter before the top view
-                    bottom = min(bottom, cy - half)
-    u = np.array([1.0, 0.0])  # the section looks from the left, i.e. to the right on the front view
-    for y0, sign in ((top, 1), (bottom, -1)):
-        a, b = np.array([x, y0 + sign * 1.0]), np.array([x, y0 + sign * 6.0])
+        if d["view"] == view:
+            c, rr = to_paper(d["centre"], o, s), d["R"] * s
+            if abs(c[k] - pos) < rr:
+                half = np.sqrt(rr * rr - (c[k] - pos) ** 2)
+                if c[j] + half > ends[1] and clear(c[j] + half, 1):
+                    ends[1] = c[j] + half
+                if c[j] - half < ends[0] and clear(c[j] - half, -1):
+                    ends[0] = c[j] - half
+
+    def at(along, sign=0.0, offset=0.0):  # paper point on the cutting line
+        p = np.zeros(2)
+        p[k], p[j] = pos, along + sign * offset
+        return p
+
+    e = ext[view]
+    middle = (e[k] + e[k + 2]) / 2
+    if not (sym[view][k] and abs(sec["pos"] - middle) < 1e-3 * max(_size(e))):
+        msp.add_line(tuple(at(ends[0], -1, 1.0)), tuple(at(ends[1], 1, 1.0)),
+                     dxfattribs={"layer": "CENTER", "ltscale": 0.5})
+    for along, sign in ((ends[1], 1), (ends[0], -1)):
+        a, b = at(along, sign, 1.0), at(along, sign, 6.0)
         msp.add_line(tuple(a), tuple(b), dxfattribs={"layer": "CENTER", "linetype": "Continuous", "lineweight": 50})
         tip = b + 6 * u
+        side = np.array([-u[1], u[0]])
         msp.add_line(tuple(b), tuple(tip - 2.4 * u), dxfattribs={"layer": "DIMS"})
-        msp.add_solid([tuple(tip), tuple(tip - 2.5 * u + (0, 0.8)), tuple(tip - 2.5 * u - (0, 0.8))],
+        msp.add_solid([tuple(tip), tuple(tip - 2.5 * u + 0.8 * side), tuple(tip - 2.5 * u - 0.8 * side)],
                       dxfattribs={"layer": "DIMS"})
-        text(msp, sec["letter"], tip[0] + 1.5, tip[1] - 2.5 + sign * 0.5, h=5, align="LEFT")
+        if k == 0:  # the letter beyond the arrow head
+            text(msp, sec["letter"], tip[0] + 1.5 * u[0], tip[1] - 2.5 + sign * 0.5, h=5,
+                 align="LEFT" if u[0] > 0 else "RIGHT")
+        else:
+            text(msp, sec["letter"], tip[0], tip[1] + 1.5 * u[1], h=5,
+                 align="BOTTOM_CENTER" if u[1] > 0 else "TOP_CENTER")
 
 
 def origin_symbol(msp, x, y, size=7.0):
@@ -1172,18 +1303,17 @@ def datum_summary(datums, where):
     return out
 
 
-def datum_marks(shape, datums, lay, frames, lines, views, section):
-    """(letter, [(paper point on the feature, outward unit direction)]) per datum.
+def datum_marks(shape, datums, lay, frames, lines, views, sections):
+    """(letter, [(paper point on the feature, outward unit direction)], opening) per datum.
 
     A goes on a view that shows its face edge-on where nothing stands in front
     of it; B and C on the outline of their (first) opening, in the view or
-    detail where it is tagged.
+    detail where it is tagged. `opening` is (paper centre, half width, half
+    height, round) for B and C, None for A.
     """
     places = {v: (frames[v], lines[v], *view_place(lay, v), None) for v in views}
-    if section:  # material in front of the cutting plane is gone in the section
-        x_front = np.cross(frames["front"][1], frames["front"][0])
-        places["section"] = (frames["left"], section["lines"], section["origin"], section["scale"],
-                             (x_front, section["at"]))
+    for sec in sections:  # material in front of the cutting plane is gone in a section
+        places[sec["key"]] = (sec["frame"], sec["lines"], sec["origin"], sec["scale"], (sec["normal"], sec["offset"]))
     face, spots = datums["A"], []
     for frame, polylines, o, s, cut in sorted(places.values(), key=lambda p: -p[3]):  # larger scale first
         d, y = frame
@@ -1207,7 +1337,7 @@ def datum_marks(shape, datums, lay, frames, lines, views, section):
             stop = 1e5 if cut is None else p3 @ cut[0] - cut[1]  # up to the cutting plane
             if stop <= 0.02 or geometry.clear_ray(shape, p3, d, stop=stop):
                 spots.append((to_paper(q, o, s), n2))
-    marks = [("A", spots)]
+    marks = [("A", spots, None)]
     for letter in ("B", "C"):
         members = datums[letter]
         if not members:
@@ -1223,21 +1353,65 @@ def datum_marks(shape, datums, lay, frames, lines, views, section):
             e = r["entry"]
             hx = hy = max(h["diameter"], (e["cbore"] or [0])[0], (e["csk"] or [0])[0]) / 2 * s
         marks.append((letter, [(c + (0, hy), np.array([0.0, 1.0])), (c - (0, hy), np.array([0.0, -1.0])),
-                               (c + (hx, 0), np.array([1.0, 0.0])), (c - (hx, 0), np.array([-1.0, 0.0]))]))
+                               (c + (hx, 0), np.array([1.0, 0.0])), (c - (hx, 0), np.array([-1.0, 0.0]))],
+                      (c, hx, hy, h.get("kind") != "port")))
     return marks
 
 
-def place_datums(msp, occ, marks):
+def datum_moves(marks, moves, places, face):
+    """{letter: (paper point on the feature, outward direction, leader length)} for the datum
+    indicators moved in the app. A: its triangle on the face where it was picked, the letter
+    square to the face towards the chosen point; B and C: the letter at the chosen offset from
+    the opening's centre, the triangle on the outline in line with it (ISO 5459)."""
+    fixed = {}
+    for letter, _, opening in marks:
+        m = moves.get(f"datum {letter}")
+        if letter == "A":
+            if not isinstance(m, dict) or m.get("view") not in places or _pick(m.get("point")) is None \
+                    or _xy(m.get("at")) is None:
+                continue
+            place = places[m["view"]]
+            d, y = (np.asarray(v, float) for v in place["frame"])
+            n = np.array([face["normal"] @ np.cross(y, d), face["normal"] @ y])
+            if np.abs(n).max() < 0.999:
+                continue  # that view does not show the face edge-on
+            p, reach = on_paper(place, m["point"]), float(_xy(m["at"]) @ n)
+        else:
+            at = _xy(m)
+            if at is None or opening is None or np.hypot(*at) < 1e-6:
+                continue
+            c, hx, hy, round_ = opening
+            if round_:
+                n, half = at / np.hypot(*at), hx
+            else:  # a port: the side facing the chosen point
+                k = int(np.argmax(np.abs(at)))
+                n, half = np.eye(2)[k] * np.sign(at[k]), (hx, hy)[k]
+            p, reach = c + half * n, float(at @ n) - half
+        fixed[letter] = (p, n, max(reach - 2.6 - DATUM_BOX / 2, 2.0))  # the frame's centre at the chosen reach
+    return fixed
+
+
+def _datum_frame(p, n, length):
+    """Apex of the datum triangle on p, end of its leader and the letter's frame."""
+    apex = p + 2.6 * n
+    end = apex + length * n
+    c = end + n * DATUM_BOX / 2
+    return apex, end, (c[0] - DATUM_BOX / 2, c[1] - DATUM_BOX / 2, c[0] + DATUM_BOX / 2, c[1] + DATUM_BOX / 2)
+
+
+def place_datums(msp, occ, marks, fixed=None):
     """ISO 5459 datum feature indicators: filled triangle on the feature, leader, framed letter,
-    each where its frame lands in the freest space."""
-    for letter, spots in marks:
+    each where its frame lands in the freest space, or as moved in the app (`fixed`, from
+    datum_moves). Returns {"datum A": (frame box, opening centre or None), ...}."""
+    placed = {}
+    for letter, spots, opening in marks:
         best = None
-        for k, (p, n) in enumerate(spots):
+        if letter in (fixed or {}):
+            p, n, length = fixed[letter]
+            best = (0, p, n, *_datum_frame(p, n, length))
+        for k, (p, n) in enumerate(spots if best is None else []):
             for length in (2.0, 4.0, 7.0, 11.0):
-                apex = p + 2.6 * n
-                end = apex + length * n
-                c = end + n * DATUM_BOX / 2
-                box = (c[0] - DATUM_BOX / 2, c[1] - DATUM_BOX / 2, c[0] + DATUM_BOX / 2, c[1] + DATUM_BOX / 2)
+                apex, end, box = _datum_frame(p, n, length)
                 lead = (min(apex[0], end[0]) - 0.3, min(apex[1], end[1]) - 0.3,
                         max(apex[0], end[0]) + 0.3, max(apex[1], end[1]) + 0.3)
                 cost = 10 * occ.cost((box[0] - 0.5, box[1] - 0.5, box[2] + 0.5, box[3] + 0.5)) + \
@@ -1254,14 +1428,24 @@ def place_datums(msp, occ, marks):
         text(msp, letter, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, align="MIDDLE_CENTER", layer="HOLES")
         occ.box(box)
         occ.polyline([p, end])
+        placed[f"datum {letter}"] = (box, opening[0] if opening else None)
+    return placed
 
 
-def place_tags(msp, occ, marks):
-    """Tag text next to each hole in the freest spot; farther out with a leader if crowded."""
+def place_tags(msp, occ, marks, moves=None):
+    """Tag text next to each hole in the freest spot; farther out with a leader if crowded,
+    or where it was moved in the app (`moves`: "tag A1" = offset of the tag's centre from the
+    hole's). Returns {"tag A1": (box, hole centre), ...}, keyed by the spot's first tag."""
+    placed = {}
     for tag, cx, cy, rp in marks:
+        key = "tag " + tag.split(", ")[0]
         w, h = text_width(tag, TAG_H), TAG_H * 1.29
-        best = None
-        for ring, gap in enumerate((0.8, 4.0, 8.0)):
+        best, at = None, _xy((moves or {}).get(key))
+        if at is not None:
+            box = (cx + at[0] - w / 2, cy + at[1] - h / 2, cx + at[0] + w / 2, cy + at[1] + h / 2)
+            gap = np.hypot(np.clip(cx, box[0], box[2]) - cx, np.clip(cy, box[1], box[3]) - cy) - rp
+            best = (0, box, int(gap > 1.0), at / max(np.hypot(*at), 1e-9))  # a leader unless next to the hole
+        for ring, gap in enumerate((0.8, 4.0, 8.0) if best is None else ()):
             for k, angle in enumerate((45, 135, -45, -135, 0, 180, 90, -90)):
                 u = np.array([np.cos(np.radians(angle)), np.sin(np.radians(angle))])
                 dist = rp + gap + 0.5 * abs(w * u[0]) + 0.5 * abs(h * u[1])
@@ -1279,6 +1463,8 @@ def place_tags(msp, occ, marks):
             end = (np.clip(cx, box[0], box[2]), np.clip(cy, box[1], box[3]))
             msp.add_line(start, end, dxfattribs={"layer": "HOLES"})
             occ.polyline([start, end])
+        placed[key] = (box, (cx, cy))
+    return placed
 
 
 def _extreme_point(polylines, axis, low, pick_high):
@@ -1345,6 +1531,32 @@ def texture_symbol(msp, x, y, h1=2.5, kind="any", layer="TEXT"):
     return np.array([x + 2 * h1 / t, y + 2 * h1])
 
 
+def on_paper(place, point):
+    """Paper position of a model point in a view (a `places` entry)."""
+    d, y = (np.asarray(v, float) for v in place["frame"])
+    p = np.asarray(point, float)
+    return np.asarray(place["origin"], float) + np.array([p @ np.cross(y, d), p @ y]) * place["scale"]
+
+
+def leader(msp, tip, knee, edge, layer):
+    """ISO 128-22 leader line from `knee` to `tip`: an arrowhead on an outline (`edge`),
+    a dot inside one."""
+    tip, knee = np.asarray(tip, float), np.asarray(knee, float)
+    u = (tip - knee) / max(np.linalg.norm(tip - knee), 1e-9)
+    attribs = {"layer": layer}
+    if edge:
+        msp.add_line(tuple(knee), tuple(tip - 2.4 * u), dxfattribs=attribs)
+        side = np.array([-u[1], u[0]])
+        msp.add_solid([tuple(tip), tuple(tip - 2.5 * u + 0.8 * side), tuple(tip - 2.5 * u - 0.8 * side)],
+                      dxfattribs=attribs)
+    else:
+        msp.add_line(tuple(knee), tuple(tip), dxfattribs=attribs)
+        msp.add_circle(tuple(tip), 0.5, dxfattribs=attribs)
+        msp.add_hatch(dxfattribs=attribs).paths.add_polyline_path(
+            [tuple(tip + 0.5 * np.array([np.cos(a), np.sin(a)])) for a in np.linspace(0, 2 * np.pi, 12)],
+            is_closed=True)
+
+
 def surface_marks(msp, marks, places):
     """Surface texture marks placed in the app: a leader from the surface (arrow on an
     edge-on surface, dot on one seen face-on) to a short reference line carrying the
@@ -1356,23 +1568,10 @@ def surface_marks(msp, marks, places):
         if not place or not m.get("point") or not m.get("at"):
             missing.append(m)
             continue
-        d, y = (np.array(v) for v in place["frame"])
-        p3 = np.array(m["point"], float)
-        tip = to_paper(np.array([p3 @ np.cross(y, d), p3 @ y]), np.array(place["origin"]), place["scale"])
+        tip = on_paper(place, m["point"])
         knee = tip + np.array(m["at"], float)
-        u = (tip - knee) / max(np.linalg.norm(tip - knee), 1e-9)
         attribs = {"layer": "SURFACES"}
-        if m.get("edge"):
-            msp.add_line(tuple(knee), tuple(tip - 2.4 * u), dxfattribs=attribs)
-            side = np.array([-u[1], u[0]])
-            msp.add_solid([tuple(tip), tuple(tip - 2.5 * u + 0.8 * side), tuple(tip - 2.5 * u - 0.8 * side)],
-                          dxfattribs=attribs)
-        else:
-            msp.add_line(tuple(knee), tuple(tip), dxfattribs=attribs)
-            msp.add_circle(tuple(tip), 0.5, dxfattribs=attribs)
-            msp.add_hatch(dxfattribs=attribs).paths.add_polyline_path(
-                [tuple(tip + 0.5 * np.array([np.cos(a), np.sin(a)])) for a in np.linspace(0, 2 * np.pi, 12)],
-                is_closed=True)
+        leader(msp, tip, knee, m.get("edge"), "SURFACES")
         kind = m.get("finish", "machined")
         words = [w for w in ("machined" if kind == "machined" else "as built", str(m.get("ra") or "").strip()) if w]
         width = max(text_width(w, H) for w in words) + 2
@@ -1386,6 +1585,149 @@ def surface_marks(msp, marks, places):
         if len(words) > 1:
             text(msp, words[1], top[0] + 1, top[1] - 0.8 - H, layer="SURFACES")
     return missing
+
+
+# ---------------------------------------------------------------- callouts added in the app
+
+def reference_text(msp, knee, tip, lines, layer="CALLOUTS"):
+    """Text lines above a reference line that starts at `knee` and runs away from the
+    leader's tip (ISO 128-22). Returns the box of line and text."""
+    width = max(text_width(t, H) for t in lines) + 2
+    x0 = knee[0] if tip[0] <= knee[0] else knee[0] - width
+    msp.add_line((x0, knee[1]), (x0 + width, knee[1]), dxfattribs={"layer": layer})
+    for i, t in enumerate(reversed(lines)):
+        text(msp, t, x0 + 1, knee[1] + 0.8 + i * NOTE_PITCH, layer=layer)
+    return x0, knee[1], x0 + width, knee[1] + 0.8 + (len(lines) - 1) * NOTE_PITCH + H
+
+
+BALLOON_R = 4.0
+CALLOUT_TYPES = ("note", "hole", "dimension", "balloon")
+
+
+def balloon(msp, tip, centre, edge, number):
+    """A numbered circle at `centre` on a leader to `tip`. Returns its box."""
+    r = max(BALLOON_R, text_width(number, H) / 2 + 1.5)
+    u = (tip - centre) / max(np.linalg.norm(tip - centre), 1e-9)
+    leader(msp, tip, centre + r * u, edge, "CALLOUTS")
+    msp.add_circle(tuple(centre), r, dxfattribs={"layer": "CALLOUTS"})
+    text(msp, number, *centre, align="MIDDLE_CENTER", layer="CALLOUTS")
+    return centre[0] - r, centre[1] - r, centre[0] + r, centre[1] + r
+
+
+def balloon_notes(callouts, notes, warnings):
+    """Balloons refer to numbered notes: a balloon's text becomes a note after the others
+    (balloons with the same text share it); a balloon whose text is a number refers to that
+    note. Appends to `notes`; returns {callout index: note number}."""
+    numbers = {}
+    for i, c in enumerate(callouts):
+        t = str(c.get("text") or "").strip() if isinstance(c, dict) and c.get("type") == "balloon" else ""
+        if t and not t.isdigit():
+            if t not in notes:
+                notes.append(t)
+            numbers[i] = notes.index(t) + 1
+    for i, c in enumerate(callouts):
+        t = str(c.get("text") or "").strip() if isinstance(c, dict) and c.get("type") == "balloon" else ""
+        if t.isdigit():
+            if 1 <= int(t) <= len(notes):
+                numbers[i] = int(t)
+            else:
+                warnings.append(f"callout {i + 1}: there is no note {t} for its balloon; left out")
+    return numbers
+
+
+def user_dimension(msp, a, b, base, direction, scale, label):
+    """A dimension between paper points a and b, its line through `base`: horizontal,
+    vertical or aligned; `label` "<>" is the measured value."""
+    override, attribs = {"dimlfac": 1 / scale}, {"layer": "CALLOUTS"}
+    if direction == "aligned":
+        v = b - a
+        n = np.array([-v[1], v[0]]) / np.linalg.norm(v)
+        dim = msp.add_aligned_dim(p1=tuple(a), p2=tuple(b), distance=float((base - a) @ n), text=label,
+                                  dimstyle="ISO", override=override, dxfattribs=attribs)
+    else:
+        dim = msp.add_linear_dim(base=tuple(base), p1=tuple(a), p2=tuple(b),
+                                 angle=0 if direction == "horizontal" else 90, text=label, dimstyle="ISO",
+                                 override=override, dxfattribs=attribs)
+    dim.render()
+    return dim.dimension
+
+
+def draw_callouts(msp, callouts, places, rows, types, numbers, warnings):
+    """Leader notes, hole callouts, dimensions and balloons added in the app (layer CALLOUTS).
+
+    Each sits in its view (`places`): a leader from a model point on the part (an
+    arrow on an outline, a dot inside it), its text at an offset on the paper. A
+    hole callout reads like its hole table row unless given a text. Returns
+    {"callout i": {"box", "anchor", "label"}} for moving them in the app.
+    """
+    items = {}
+    specs = {t["key"]: t["spec"] for t in types}
+    for i, c in enumerate(callouts):
+        c = c if isinstance(c, dict) else {}
+        kind, place, at = c.get("type"), places.get(c.get("view")), _xy(c.get("at"))
+        problem = ("its type is not note, hole, dimension or balloon" if kind not in CALLOUT_TYPES
+                   else f"its view ({c.get('view')}) is not on the drawing" if place is None
+                   else "it has no position (at)" if at is None else None)
+        if problem:
+            warnings.append(f"callout {i + 1} ({kind}) is left out: {problem}")
+            continue
+        own = [t for t in str(c.get("text") or "").splitlines() if t.strip()]
+        if kind == "dimension":
+            pts = [_pick(p) for p in c.get("points") or []]
+            a, b = (on_paper(place, p) for p in pts) if len(pts) == 2 and all(p is not None for p in pts) else (0, 0)
+            if np.hypot(*(np.asarray(b) - a)) < 1e-6:
+                warnings.append(f"callout {i + 1} (dimension) is left out: it needs two different points")
+                continue
+            direction = c.get("direction") if c.get("direction") in ("vertical", "aligned") else "horizontal"
+            dim = user_dimension(msp, a, b, a + at, direction, place["scale"], " ".join(own) or "<>")
+            label = [v for v in dim.virtual_entities() if v.dxftype() in ("MTEXT", "TEXT")]
+            box = ezdxf.bbox.extents(label)
+            items[f"callout {i}"] = {"box": (box.extmin.x, box.extmin.y, box.extmax.x, box.extmax.y), "anchor": a,
+                                     "label": f"dimension {round(dim.get_measurement() / place['scale'], 3):g}"}
+            continue
+        point = _pick(c.get("point"))
+        if point is None:
+            warnings.append(f"callout {i + 1} ({kind}) is left out: it has no point")
+            continue
+        if kind == "hole":
+            row = min(rows, key=lambda r: np.linalg.norm(r["point"] - point), default=None)
+            if row is None or np.linalg.norm(row["point"] - point) > 0.05:
+                warnings.append(f"callout {i + 1} (hole) is left out: no hole or port at {point.tolist()}")
+                continue
+            h, e = row["hole"], row["entry"]
+            centre, s = on_paper(place, row["point"]), place["scale"]
+            knee = centre + at
+            u = at / max(np.hypot(*at), 1e-9)
+            if h.get("kind") == "port":  # the leader ends on the rectangle
+                d, y = (np.asarray(v, float) for v in place["frame"])
+                half = np.array(h["size"]) / 2 * s
+                hx, hy = half if abs(h["long"] @ np.cross(y, d)) > 0.5 else half[::-1]
+                reach = min(hx / max(abs(u[0]), 1e-9), hy / max(abs(u[1]), 1e-9))
+            else:  # ... on the outermost circle
+                reach = max(h["diameter"], (e["cbore"] or [0])[0], (e["csk"] or [0])[0]) / 2 * s
+            if not own:
+                count = sum(r["view"] == row["view"] and r["key"] == row["key"] for r in rows)
+                size = holes.size_text(h, e, specs[row["key"]], row["x_dir"])
+                own = _wrap(f"{count}× {size}" if count > 1 else size, 70, H)
+            leader(msp, centre + reach * u, knee, True, "CALLOUTS")
+            box = reference_text(msp, knee, centre, own)
+            items[f"callout {i}"] = {"box": box, "anchor": centre, "label": f"{row['tag']}: {' '.join(own)}"}
+            continue
+        tip = on_paper(place, point)
+        knee = tip + at
+        if kind == "note":
+            if not own:
+                warnings.append(f"callout {i + 1} (note) is left out: it has no text")
+                continue
+            leader(msp, tip, knee, c.get("edge", True), "CALLOUTS")
+            box = reference_text(msp, knee, tip, own)
+            items[f"callout {i}"] = {"box": box, "anchor": tip, "label": "note: " + " ".join(own)}
+        elif i in numbers:
+            box = balloon(msp, tip, knee, c.get("edge", True), str(numbers[i]))
+            items[f"callout {i}"] = {"box": box, "anchor": tip, "label": f"balloon {numbers[i]}"}
+        elif not own:
+            warnings.append(f"callout {i + 1} (balloon) is left out: it has no text")
+    return items
 
 
 def title_block(msp, lay, tb, mass=""):
@@ -1514,8 +1856,9 @@ def build(shape, cfg):
     if geometry.same_view(lines["left"], lines["front"], ext["left"], ext["front"]):
         ortho.remove("left")  # e.g. a turned part: the side view repeats the front view
 
+    entries, letters = section_letters(cfg.get("sections"))  # sections added in the app keep their letters
     rows, types, warnings = plan_holes(geometry.holes(shape) + geometry.ports(shape), frames, ortho, cfg)
-    needs = aux_needs(rows, ortho, ext)
+    needs = aux_needs(rows, ortho, ext, letters)
     for need in needs:
         lines[need["view"]] = geometry.project(shape, *frames[need["view"]])
     shown = ortho + [n["view"] for n in needs]
@@ -1532,14 +1875,19 @@ def build(shape, cfg):
     if any(frame for _, _, groups in tables for *_, frame in groups):
         notes.insert(len(general_notes(cfg)), "Hole table X/Y are theoretically exact dimensions (ISO 1101); "
                                               "they are toleranced by the position tolerance of their group.")
-    section = plan_section(shape, frames, ext, cfg)
+    callouts = cfg.get("callouts") or []
+    numbers = balloon_notes(callouts, notes, warnings)
+    sections = plan_sections(shape, frames, ext, cfg, entries,
+                             ortho + [n["view"] for n in needs if not n["partial"]], warnings)
     lay = choose_layout({v: ext[v] for v in ortho}, notes_height(notes), cfg["sheet"], cfg["scale"], block,
-                        needs, section=section and section["ext"],
-                        slot="left" not in ortho)  # the section may take the place of a repeated side view
-    in_slot = "section" in lay["rects"]
+                        needs, sections=sections,
+                        slot="left" not in ortho)  # a section may take the place of a repeated side view
     if lay["section_dropped"]:
-        section = None
+        sections = sections[1:]
         warnings.append(f"no room for the section view on {lay['sheet']}: left out (a larger sheet shows it)")
+    lay["letters"] = iter(letters[len(needs):])
+    moves = cfg.get("moves") or {}
+    move_blocks(lay, moves, sections)
     s = lay["scale"]
     doc = new_doc()
     msp = doc.modelspace()
@@ -1548,11 +1896,12 @@ def build(shape, cfg):
     info = {"sheet": lay["sheet"], "scale": s, "front": front, "up": up, "views": ortho,
             "dims": [], "view_rects": dict(lay["rects"]), "warnings": warnings, "extra_views": []}
     circles = geometry.circles(shape)
+    centres = {}  # centre marks per view, for snapping in the app
     for name in ortho:
         o = np.array(lay["origins"][name])
         draw_view(msp, lines[name], o, s)
         draw_centre_lines(msp, ext[name], o, s, sym[name])
-        centre_marks(msp, circles, frames[name], lines[name], ext[name], o, s, sym[name])
+        centres[name] = centre_marks(msp, circles, frames[name], lines[name], ext[name], o, s, sym[name])
 
     # overall envelope: width, height, depth once each; one Ø on a round view instead of two sizes
     round_view = next((v for v in ortho if geometry.is_round(lines[v], ext[v])), None)
@@ -1567,71 +1916,107 @@ def build(shape, cfg):
         value = prefix.replace("%%c", "Ø") + str(round(dim.get_measurement() / s, 4))
         info["dims"].append((view, f"({value})" if ref else value))
 
-    info["section"] = None
-    if section:
-        section["letter"] = next(lay["letters"])
-        if in_slot:
-            section["scale"], section["origin"] = s, np.array(lay["origins"]["section"])
+    for sec in sections:
+        if sec["auto"]:
+            sec["letter"] = next(lay["letters"])
+        if lay["slot"] == sec["key"]:
+            sec["scale"], sec["origin"] = s, np.array(lay["origins"]["section"])
         else:
-            e, c = section["ext"], lay["section"]["scale"]
-            section["scale"] = c
-            section["origin"] = lay["section"]["paper"] - np.array([(e[0] + e[2]) / 2, (e[1] + e[3]) / 2]) * c
-        info["view_rects"]["section"] = draw_section(msp, section, lay, frames, circles,
-                                                     axis="left" not in ortho and sym["front"][0])
-        info["section"] = f"{section['letter']}–{section['letter']}"
+            e, c = sec["ext"], lay["sections"][sec["key"]]["scale"]
+            sec["scale"] = c
+            sec["origin"] = lay["sections"][sec["key"]]["paper"] - np.array([(e[0] + e[2]) / 2, (e[1] + e[3]) / 2]) * c
+        info["view_rects"][sec["key"]], centres[sec["key"]] = draw_section(
+            msp, sec, lay, circles, axis=sec["auto"] and "left" not in ortho and sym["front"][0])
+    info["section"] = next((f"{x['letter']}–{x['letter']}" for x in sections if x["auto"]), None)
+    info["sections"] = [{"key": x["key"], "label": f"{x['letter']}–{x['letter']}", "view": x["view"],
+                         "auto": x["auto"]} for x in sections]
 
-    info["view_rects"].update(draw_aux(msp, lay, lines, frames, ext, sym, circles))
+    rects, aux_centres = draw_aux(msp, lay, lines, frames, ext, sym, circles)
+    info["view_rects"].update(rects)
+    centres.update(aux_centres)
     info["extra_views"] = [f"{a['letter']} from the {v}" if v in ("left", "right") else
                            f"{a['letter']} from {'below' if v == 'bottom' else 'behind'}"
                            for v, a in lay["aux"].items()]
     details = plan_details(rows, lay, shown) if rows else []
     for d in details:  # the detail circle itself; its label sits above it
+        at = _xy(moves.get(f"detail {d['letter']}"))
+        if at is not None:
+            d["box"], shift = _shifted(lay, d["box"], d["paper"], at)
+            d["paper"], d["origin"] = d["paper"] + shift, d["origin"] + shift
         cx, cy, rr = *d["paper"], d["R"] * d["scale"]
         info["view_rects"][f"detail {d['letter']}"] = (cx - rr, cy - rr, cx + rr, cy + rr)
-    if section:
-        cutting_plane(msp, lay, section, details)
+    for sec in sections:
+        cutting_plane(msp, lay, sec, details, info["view_rects"], ext, sym)
 
     iso_w, iso_h = _size(ext["iso"])
     r, fit = free_rect(lay, (iso_w, iso_h))
     iso_scale = next((c for c in SCALES if c <= min(s, fit)), None) if r else None
     if iso_scale:
         cx, cy = (r[0] + r[2]) / 2, (r[1] + r[3] + H + 4) / 2
+        at = _xy(moves.get("iso"))
+        if at is not None:  # where it was moved, inside the frame
+            half, a = np.array([iso_w, iso_h]) * iso_scale / 2 + PAD, lay["area"]
+            cx = float(np.clip(at[0], a[0] + half[0], max(a[0] + half[0], a[2] - half[0])))
+            cy = float(np.clip(at[1], a[1] + half[1], max(a[1] + half[1], a[3] - half[1])))
         e = ext["iso"]
-        o = np.array((cx - (e[0] + e[2]) / 2 * iso_scale, cy - (e[1] + e[3]) / 2 * iso_scale))
-        draw_view(msp, lines["iso"], o, iso_scale)
-        info["view_rects"]["iso"] = (*to_paper(e[:2], o, iso_scale), *to_paper(e[2:], o, iso_scale))
+        iso_origin = np.array((cx - (e[0] + e[2]) / 2 * iso_scale, cy - (e[1] + e[3]) / 2 * iso_scale))
+        draw_view(msp, lines["iso"], iso_origin, iso_scale)
+        info["view_rects"]["iso"] = (*to_paper(e[:2], iso_origin, iso_scale), *to_paper(e[2:], iso_origin, iso_scale))
         if iso_scale != s:
             text(msp, f"ISOMETRIC  {fmt_scale(iso_scale)}", cx, info["view_rects"]["iso"][1] - 2,
                  align="TOP_CENTER")
 
-    draw_details(msp, details, lines, frames, ext, sym, circles, lay)
+    centres.update(draw_details(msp, details, lines, frames, ext, sym, circles, lay))
 
-    # where each view sits on the paper: for surface marks and for picking in the app
-    def place_of(origin, scale, frame, rect, **extra):
+    # where each view sits on the paper, with its lines and centre marks: for surface marks,
+    # callouts and for picking in the app
+    def place_of(key, origin, scale, frame, rect, lines, **extra):
         return {"origin": [float(v) for v in origin], "scale": float(scale),
                 "frame": [np.asarray(frame[0], float).tolist(), np.asarray(frame[1], float).tolist()],
-                "rect": [float(v) for v in rect], **extra}
+                "rect": [float(v) for v in rect], "lines": lines, "centres": centres.get(key, []), **extra}
 
     def label(v):  # as the holes list names views
         return v if v in ortho else f"view {lay['aux'][v]['letter']}"
 
-    places = {v: place_of(*view_place(lay, v), frames[v], info["view_rects"][v], label=label(v))
+    places = {v: place_of(v, *view_place(lay, v), frames[v], info["view_rects"][v], lines[v], label=label(v),
+                          kind="main" if v in ortho else "extra", sym=list(sym[v]),
+                          partial=bool(lay["aux"].get(v, {}).get("partial")))
               for v in ortho + list(lay["aux"])}
-    if section:
-        places["section"] = place_of(section["origin"], section["scale"], frames["left"],
-                                     info["view_rects"]["section"], label="section",
-                                     cut=[np.cross(frames["front"][1], frames["front"][0]).tolist(),
-                                          float(section["at"])])
+    for sec in sections:
+        places[sec["key"]] = place_of(sec["key"], sec["origin"], sec["scale"], sec["frame"],
+                                      info["view_rects"][sec["key"]], sec["lines"], label=sec["key"],
+                                      kind="section", cut=[sec["normal"].tolist(), sec["offset"]])
     for d in details:
-        places[f"detail {d['letter']}"] = place_of(d["origin"], d["scale"], frames[d["view"]],
-                                                   info["view_rects"][f"detail {d['letter']}"],
-                                                   label=label(d["view"]), parent=d["view"])
+        key = f"detail {d['letter']}"
+        places[key] = place_of(key, d["origin"], d["scale"], frames[d["view"]], info["view_rects"][key],
+                               lines[d["view"]], label=label(d["view"]), kind="detail", parent=d["view"])
+    if "iso" in info["view_rects"]:
+        places["iso"] = place_of("iso", iso_origin, iso_scale, frames["iso"], info["view_rects"]["iso"],
+                                 lines["iso"], label="iso", kind="iso")
     info["places"] = places
     for m in surface_marks(msp, (cfg.get("surfaces") or {}).get("marks"), places):
         warnings.append(f"a surface mark on the {m.get('view')} view is left out: that view is not on the drawing")
+
+    # what can be moved in the app, and where it is now
+    names = {v: f"view {a['letter']}" for v, a in lay["aux"].items()} | {"iso": "isometric view"}
+    names |= {x["key"]: f"section {x['letter']}–{x['letter']}" for x in sections}
+    names |= {f"detail {d['letter']}": f"detail {d['letter']}" for d in details}
+    items = {key: {"box": tuple(info["view_rects"][key]), "kind": "view", "label": name}
+             for key, name in names.items() if key in info["view_rects"]}
+    if "table" in lay:
+        items["hole table"] = {"box": lay["table"], "kind": "view", "label": "hole table"}
+    for key, item in draw_callouts(msp, callouts, places, rows, types, numbers, warnings).items():
+        items[key] = {**item, "kind": "callout", "index": int(key.split()[1])}
     full_aux = [v for v, a in lay["aux"].items() if not a["partial"]]
-    spots = datum_marks(shape, datums, lay, frames, lines, ortho + full_aux, section) if datums else []
-    draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details, frames, ortho, spots)
+    spots = datum_marks(shape, datums, lay, frames, lines, ortho + full_aux, sections) if datums else []
+    fixed = datum_moves(spots, moves, places, datums["A"]) if datums else {}
+    for key, (box, anchor) in draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details,
+                                         frames, ortho, spots, moves, fixed).items():
+        items[key] = {"box": box, "kind": "datum A" if key == "datum A" else "offset", "label": key,
+                      "anchor": None if anchor is None else np.asarray(anchor, float)}
+    info["items"] = items
+    info["letters"] = ([a["letter"] for a in lay["aux"].values()] + [x["letter"] for x in sections] +
+                       [d["letter"] for d in details])
 
     def where(r):
         return r["view"] if r["view"] in ortho else f"view {lay['aux'][r['view']]['letter']}"
@@ -1665,14 +2050,18 @@ def build(shape, cfg):
     return doc, info
 
 
-def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details, frames, ortho, datum_spots=()):
+def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, details, frames, ortho, datum_spots=(),
+               moves=None, fixed=None):
     """ISO 6410 thread arcs, port centre lines, table origins, datum indicators,
     reference arrows, tags and the tables.
 
     Every hole is annotated in the view (or detail) where its opening is visible.
+    Tags and datum indicators go where they were moved in the app (`moves`, and
+    `fixed` from datum_moves), else in the freest space. Returns where each tag and
+    datum indicator went: {key: (box, centre of its hole or None)}.
     """
     if not rows:
-        return
+        return {}
     specs = {t["key"]: t["spec"] for t in types}
     spots = {}  # tags of holes drawn on the same spot are combined
     for r in rows:
@@ -1714,12 +2103,13 @@ def draw_holes(msp, lay, rows, types, origins, at_centre, tables, widths, detail
         occ.entity(e)
     occ.box(lay["title_block"])
     occ.box(lay["table"])
-    place_datums(msp, occ, datum_spots)
+    placed = place_datums(msp, occ, datum_spots, fixed)
     arrows = [(a["letter"], frames[view][0], [r["point"] for r in rows if r["view"] == view])
               for view, a in lay["aux"].items()]
     place_arrows(msp, occ, lay, frames, ortho, arrows)
-    place_tags(msp, occ, [(", ".join(tags), cx, cy, rp) for tags, cx, cy, rp in spots.values()])
+    placed |= place_tags(msp, occ, [(", ".join(tags), cx, cy, rp) for tags, cx, cy, rp in spots.values()], moves)
     draw_tables(msp, lay["table"], lay["table_columns"], widths)
+    return placed
 
 
 def mass_grams(shape, cfg):
@@ -1743,7 +2133,7 @@ def check(doc, info, lay):
             for v in e.virtual_entities():
                 if v.dxftype() in ("MTEXT", "TEXT"):
                     boxes.append((v.plain_text() if v.dxftype() == "MTEXT" else v.dxf.text,
-                                  ezdxf.bbox.extents([v]), "DIMS"))
+                                  ezdxf.bbox.extents([v]), e.dxf.layer))
     boxes = [(t, (b.extmin.x, b.extmin.y, b.extmax.x, b.extmax.y), layer) for t, b, layer in boxes
              if b.has_data]
     problems = []
@@ -1752,11 +2142,11 @@ def check(doc, info, lay):
             problems.append(f"text '{ta}' overlaps text '{tb}'")
     for t, a, layer in boxes:
         for name, r in info["view_rects"].items():
-            if layer not in ("HOLES", "SURFACES") and _overlap(a, r):  # annotations belong on their view
+            if layer not in ("HOLES", "SURFACES", "CALLOUTS") and _overlap(a, r):  # annotations belong on their view
                 problems.append(f"text '{t}' overlaps {name} view")
         if not _inside(a, lay["area"]):
             problems.append(f"text '{t}' outside frame")
-    ext = ezdxf.bbox.extents(e for e in doc.modelspace() if e.dxf.layer in ("VISIBLE", "DIMS"))
+    ext = ezdxf.bbox.extents(e for e in doc.modelspace() if e.dxf.layer in ("VISIBLE", "DIMS", "CALLOUTS"))
     area = lay["area"]
     if ext.extmin.x < area[0] or ext.extmin.y < area[1] or ext.extmax.x > area[2] or ext.extmax.y > area[3]:
         problems.append("geometry or dimensions outside frame")
